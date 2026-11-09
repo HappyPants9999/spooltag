@@ -3,6 +3,7 @@
 services:
   spooltag:
     image: ghcr.io/happypants9999/spooltag:latest
+    pull_policy: always                    # redeploys fetch the newest build
     container_name: spooltag
     restart: unless-stopped
     ports:
