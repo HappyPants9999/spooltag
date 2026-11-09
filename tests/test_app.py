@@ -146,6 +146,12 @@ def test_status_tags_and_clear(env):
     assert fake.spools[42]["location"] == "Dry rack"
 
 
+def test_label_skips_name_equal_to_material():
+    from app.clients import spool_label
+    spool = {"id": 1, "filament": {"name": "ABS", "material": "ABS", "vendor": {"name": "Bambu Lab"}}}
+    assert spool_label(spool) == "Bambu Lab ABS"
+
+
 def test_pending_expires(tmp_path):
     fake = FakeBackends()
     app = create_app(settings(tmp_path, pending_timeout=-1), transport=httpx.MockTransport(fake.handler))

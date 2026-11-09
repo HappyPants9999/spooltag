@@ -93,5 +93,8 @@ def _extra(obj: dict, key: str) -> Optional[str]:
 def spool_label(spool: dict) -> str:
     fil = spool.get("filament") or {}
     vendor = (fil.get("vendor") or {}).get("name")
-    parts = [p for p in (vendor, fil.get("material"), fil.get("name")) if p]
+    name = fil.get("name")
+    if name and name.casefold() == (fil.get("material") or "").casefold():
+        name = None  # filament named after its material: "Bambu Lab ABS", not "Bambu Lab ABS ABS"
+    parts = [p for p in (vendor, fil.get("material"), name) if p]
     return " ".join(parts) or f"Spool {spool.get('id')}"
