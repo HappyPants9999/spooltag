@@ -18,8 +18,11 @@ class Spoolman:
         r.raise_for_status()
         return r.json()
 
-    async def spools(self) -> list[dict]:
-        r = await self.client.get(f"{self.base}/api/v1/spool", params={"allow_archived": "false"})
+    async def spools(self, location: Optional[str] = None) -> list[dict]:
+        params = {"allow_archived": "false"}
+        if location is not None:
+            params["location"] = location
+        r = await self.client.get(f"{self.base}/api/v1/spool", params=params)
         r.raise_for_status()
         return r.json()
 

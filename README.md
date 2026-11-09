@@ -1,28 +1,35 @@
 # spooltag
 
-Tap your phone on a spool tag, then on a tool tag, and the printer knows what's loaded.
+Tap your phone on a spool tag, then on a tool or storage tag, and everything knows where that spool is.
 
-spooltag is a small web service for a Klipper toolchanger (built for an 8-tool INDX on a Sovol SV08). NFC tags hold plain URLs, so tapping one opens a page in the phone's browser. The service pairs the two scans, in either order, and updates three things:
+spooltag is a small web service for Klipper printers, built for an 8-tool INDX on a Sovol SV08 alongside a Voron V0. NFC tags hold plain URLs, so tapping one opens a page in the phone's browser. The service pairs a spool scan with a tool or storage scan, in either order, and keeps these in step:
 
 | Where | What | Who reads it |
 |---|---|---|
-| Moonraker `lane_data` → `T<n>` | `lane`, `spool_id`, `material`, `color`, `vendor_name`, `name`, temps, optional `filament_id` | OrcaSlicer's Moonraker filament sync, plus slot-sync plugins such as [orca_spoolman_presets](https://github.com/DIEHARDave/orca_spoolman_presets) |
-| Spoolman spool `location` | e.g. `SV08 T3` | Spoolman, Mainsail |
-| Klipper variables *(optional)* | `t3__spool_id` save variable / `T3.spool_id` | Mainsail's per-tool spool display |
+| Each printer's Moonraker `lane_data` → `T<n>` | `lane`, `spool_id`, `material`, `color`, `vendor_name`, `name`, temps, optional `filament_id` | OrcaSlicer's Moonraker filament sync, plus [PipSpool Slot Sync](https://github.com/HappyPants9999/orca_spoolman_presets) |
+| Spoolman spool `location` | e.g. `SV08 T3`, `Voron V0 T0`, `Dry box 1` | Spoolman, Mainsail |
+| Klipper variables *(optional, per printer)* | `t3__spool_id` save variable / `T3.spool_id` | Mainsail's per-tool spool display |
 
-Other housekeeping:
+Housekeeping:
+- **A spool is in one place only.** Loading it into a tool, on any printer, or storing it in a location removes it from whatever tool it was in before.
 - The spool a new scan pushes out of a tool is moved to `UNLOAD_LOCATION`.
-- A spool can only be in one tool at a time. Assigning it to a second tool removes it from the first.
 - The `T<n>` key matches Mainsail's, so picking a spool in Mainsail overwrites the same record instead of creating a duplicate.
+- Bambu AMS slots are left to Bambuddy. Those spools can still be scanned into storage.
 
 ## Pages
 
 | URL | Purpose |
 |---|---|
 | `/s/<spool id>` | spool tag |
-| `/t/<n>` | tool tag (`/t/3` or `/t/T3`) |
-| `/` | what's in every tool, a Clear button for each, and recent scans |
-| `/tags` | URL and QR code for every tool and spool, to use when writing tags |
+| `/t/<printer>/<n>` | tool tag, e.g. `/t/sv08/3`, `/t/v0/0` |
+| `/t/<n>` | tool of the first printer (tags from 0.1 keep working) |
+| `/l/<location>` | storage tag, e.g. `/l/dry-box-1`. Scanned on its own, it shows what's stored there. |
+| `/` | every printer's tools with Clear buttons, storage with spool counts, and recent scans |
+| `/locations/<location>` | what's stored in a location |
+| `/tags` | URL and QR code for every tool, storage location and spool |
+| `/settings` | add, edit and remove printers and storage locations |
+
+Anyone on your LAN who can reach the page can change Settings, so keep the port off the internet.
 
 ## Deploy (Dockhand)
 
@@ -35,19 +42,18 @@ To update after a code change: push to GitHub, wait for the build, then redeploy
 
 ## Settings
 
+Printers and storage locations are managed on the **/settings** page and stored in `/data/spooltag.db`. Each printer has its own Moonraker URL, an optional API key, a tool count, and the two Klipper-variable switches.
+
+Environment variables:
+
 | Variable | Default | |
 |---|---|---|
 | `SPOOLMAN_URL` | `http://spoolman:8000` | Spoolman's base URL |
-| `MOONRAKER_URL` | *(empty)* | e.g. `http://192.168.1.50:7125` |
-| `MOONRAKER_API_KEY` | | only if the VM isn't a trusted client |
 | `BASE_URL` | the request's host | the URL written onto tags. **Keep it stable**, because changing it breaks every tag |
-| `NUM_TOOLS` | `8` | |
-| `PRINTER_NAME` | `SV08` | used in the location text |
 | `LOCATION_FORMAT` | `{printer} T{tool}` | Spoolman location for a loaded spool |
 | `UNLOAD_LOCATION` | *(empty = leave as is)* | location for a spool that's replaced or cleared |
 | `PENDING_TIMEOUT` | `120` | seconds to wait for the second scan |
-| `KLIPPER_SAVE_VARIABLES` | `false` | runs `SAVE_VARIABLE` (needs `[save_variables]`) |
-| `KLIPPER_MACRO_VARIABLE` | `false` | runs `SET_GCODE_VARIABLE MACRO=T<n>` (needs `variable_spool_id` on each T macro, so leave it off with DEMON_INDX unless you add one) |
+| `MOONRAKER_URL`, `PRINTER_NAME`, `NUM_TOOLS`, `MOONRAKER_API_KEY`, `KLIPPER_SAVE_VARIABLES`, `KLIPPER_MACRO_VARIABLE` | | **Only read when the printer list is empty**, to create the first printer. After that, edit the printer in Settings. |
 
 ### Exact Orca profile matching (optional)
 
@@ -59,7 +65,7 @@ Orca only matches a lane to a preset by a **string** `filament_id`. If a Spoolma
 2. On the phone, point the camera at a QR code and copy the URL.
 3. In NFC Tools: **Write → Add a record → Custom URL**, paste the URL, and write it to the tag.
 
-Write tool tags once. Rewrite a box's spool tag whenever a new spool goes into that box.
+Write tool and storage tags once. Rewrite a box's spool tag whenever a new spool goes into that box.
 
 ## Develop
 

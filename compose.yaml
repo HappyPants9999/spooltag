@@ -1,23 +1,22 @@
 # Paste into a new Dockhand stack. Fill in the <...> values.
+# Printers and storage locations are managed on the /settings page, not here.
 services:
   spooltag:
     image: ghcr.io/happypants9999/spooltag:latest
     container_name: spooltag
     restart: unless-stopped
     ports:
-      - "8090:8000"
+      - "7913:8000"
     environment:
       SPOOLMAN_URL: http://<docker-vm-ip>:7912
-      MOONRAKER_URL: http://<sv08-ip>:7125
-      # MOONRAKER_API_KEY: ""            # only if the docker VM isn't in trusted_clients
-      BASE_URL: http://<docker-vm-ip>:8090   # what gets written onto the tags — keep it stable
-      NUM_TOOLS: "8"
-      PRINTER_NAME: SV08
+      BASE_URL: http://<docker-vm-ip>:7913   # what gets written onto the tags — keep it stable
       LOCATION_FORMAT: "{printer} T{tool}"
-      UNLOAD_LOCATION: ""                 # e.g. "Dry rack": where a replaced spool goes
+      UNLOAD_LOCATION: ""                 # e.g. "Dry rack": where a replaced or cleared spool goes
       PENDING_TIMEOUT: "120"
-      KLIPPER_SAVE_VARIABLES: "false"     # needs [save_variables] in printer.cfg
-      KLIPPER_MACRO_VARIABLE: "false"     # needs variable_spool_id on each T<n> macro
       TZ: America/Denver
+      # Only read on the very first start, to create the first printer (then edit it in Settings):
+      MOONRAKER_URL: http://<sv08-ip>:7125
+      PRINTER_NAME: SV08
+      NUM_TOOLS: "8"
     volumes:
-      - /opt/appdata/spooltag:/data
+      - /appdata/spooltag:/data
