@@ -1,0 +1,23 @@
+# Paste into a new Dockhand stack. Fill in the <...> values.
+services:
+  spooltag:
+    image: ghcr.io/happypants9999/spooltag:latest
+    container_name: spooltag
+    restart: unless-stopped
+    ports:
+      - "8090:8000"
+    environment:
+      SPOOLMAN_URL: http://<docker-vm-ip>:7912
+      MOONRAKER_URL: http://<sv08-ip>:7125
+      # MOONRAKER_API_KEY: ""            # only if the docker VM isn't in trusted_clients
+      BASE_URL: http://<docker-vm-ip>:8090   # what gets written onto the tags — keep it stable
+      NUM_TOOLS: "8"
+      PRINTER_NAME: SV08
+      LOCATION_FORMAT: "{printer} T{tool}"
+      UNLOAD_LOCATION: ""                 # e.g. "Dry rack": where a replaced spool goes
+      PENDING_TIMEOUT: "120"
+      KLIPPER_SAVE_VARIABLES: "false"     # needs [save_variables] in printer.cfg
+      KLIPPER_MACRO_VARIABLE: "false"     # needs variable_spool_id on each T<n> macro
+      TZ: America/Denver
+    volumes:
+      - /opt/appdata/spooltag:/data
