@@ -32,7 +32,7 @@ input[type=checkbox]{width:auto;margin-right:.4em}
 label{display:block;margin:.5em 0 .2em;font-size:.9rem;color:var(--dim)}label.check{color:var(--fg)}
 .grid2{display:grid;grid-template-columns:1fr 1fr;gap:0 10px}@media (max-width:420px){.grid2{grid-template-columns:1fr}}
 .row{display:flex;gap:10px;align-items:center;justify-content:space-between}
-.tag{display:flex;gap:12px;align-items:center}.tag svg{flex:none;width:96px;height:96px;background:#fff;border-radius:6px}
+.tag{display:flex;gap:12px;align-items:center}button.copy{margin-top:6px}.tag svg{flex:none;width:96px;height:96px;background:#fff;border-radius:6px}
 code{overflow-wrap:anywhere;font-size:.85rem}
 details summary{cursor:pointer;color:var(--accent)}
 table{border-collapse:collapse;width:100%;font-size:.9rem}td{padding:4px 6px;border-top:1px solid var(--line);vertical-align:top}
@@ -179,13 +179,18 @@ def qr_svg(url: str) -> str:
 def _tag_card(url: str, title: str, sub: str = "", q: str = "") -> str:
     qattr = f' data-q="{escape(q)}"' if q else ""
     return (f'<div class="card tag"{qattr}>{qr_svg(url)}<div><b>{title}</b>'
-            f'{"<br><span class=dim>" + sub + "</span>" if sub else ""}<br><code>{escape(url)}</code></div></div>')
+            f'{"<br><span class=dim>" + sub + "</span>" if sub else ""}<br><code>{escape(url)}</code>'
+            f'<br><button class="copy" data-url="{escape(url)}">Copy URL</button></div></div>')
 
 
 def tags(base: str, printers: list[Printer], locations: list[Location], spools: list[dict],
          error: Optional[str]) -> str:
-    parts = ['<h1>Tag URLs</h1><p class="dim">Write these as a URL record with NFC Tools. Tool and storage '
-             'tags are written once; spool tags whenever a box gets a new spool.</p>']
+    parts = ['<h1>Tag URLs</h1><div class="card"><b>Writing a tag</b><ol style="margin:.4em 0 0;padding-left:1.3em">'
+             '<li>Tap <b>Copy URL</b> (on the phone), or scan the QR code with the phone\'s camera and copy the link.</li>'
+             '<li>In NFC Tools: <b>Write → Add a record → Custom URL</b>, paste, OK.</li>'
+             '<li>Tap <b>Write</b> and hold the phone to the tag.</li></ol>'
+             '<p class="dim" style="margin:.5em 0 0">Tool and storage tags are written once; spool tags '
+             'whenever a box gets a new spool.</p></div>']
     for p in printers:
         cards = "".join(_tag_card(f"{base}/t/{p.slug}/{t}", f"{escape(p.name)} T{t}") for t in range(p.num_tools))
         parts.append(f'<h2>{escape(p.name)}</h2><details open><summary>{p.num_tools} tool tag'
@@ -201,7 +206,15 @@ def tags(base: str, printers: list[Printer], locations: list[Location], spools: 
         for s in sorted(spools, key=lambda s: s["id"]))
     err = f'<div class="card bad">{escape(error)}</div>' if error else ""
     script = ("<script>document.getElementById('q').addEventListener('input',e=>{const v=e.target.value.toLowerCase();"
-              "document.querySelectorAll('[data-q]').forEach(c=>c.style.display=c.dataset.q.includes(v)?'':'none')})</script>")
+              "document.querySelectorAll('[data-q]').forEach(c=>c.style.display=c.dataset.q.includes(v)?'':'none')});"
+              # navigator.clipboard needs HTTPS; on plain-http LAN pages fall back to execCommand.
+              "function copyText(t){if(navigator.clipboard&&window.isSecureContext)return navigator.clipboard.writeText(t);"
+              "const a=document.createElement('textarea');a.value=t;a.setAttribute('readonly','');a.style.position='fixed';"
+              "a.style.opacity='0';document.body.appendChild(a);a.select();a.setSelectionRange(0,t.length);"
+              "const ok=document.execCommand('copy');a.remove();return ok?Promise.resolve():Promise.reject()}"
+              "document.querySelectorAll('button.copy').forEach(b=>b.addEventListener('click',()=>{"
+              "copyText(b.dataset.url).then(()=>{b.textContent='Copied ✓';setTimeout(()=>b.textContent='Copy URL',1500)},"
+              "()=>{b.textContent='Long-press the URL to copy'})}))</script>")
     parts.append(f'<h2>Spools</h2>{err}<input id="q" placeholder="Filter spools…">{spool_cards}{script}')
     return page("Tags", "".join(parts))
 
