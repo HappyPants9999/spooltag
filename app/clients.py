@@ -1,4 +1,4 @@
-"""HTTP clients for Spoolman and Moonraker."""
+"""HTTP clients for Spoolman, Moonraker and Bambuddy."""
 from typing import Any, Optional
 
 import httpx
@@ -60,6 +60,39 @@ class Moonraker:
         r = await self.client.post(f"{self.base}/printer/gcode/script", headers=self.headers,
                                    json={"script": script})
         r.raise_for_status()
+
+
+class Bambuddy:
+    """Bambuddy's Spoolman-mode slot assignments. Assigning also configures the AMS slot over
+    MQTT (type, colour, preset, K-profile), as Bambuddy's own UI does. The API key needs
+    "Manage inventory" for writes and "Read status" for reads."""
+    PATH = "/api/v1/spoolman/inventory/slot-assignments"
+
+    def __init__(self, client: httpx.AsyncClient, base_url: str, api_key: str = ""):
+        self.client = client
+        self.base = base_url
+        self.headers = {"X-API-Key": api_key} if api_key else {}
+
+    async def slots(self, printer_id: int) -> dict[tuple[int, int], int]:
+        """{(ams_id, tray_id): spoolman spool id} for one Bambuddy printer."""
+        r = await self.client.get(f"{self.base}{self.PATH}/all", params={"printer_id": printer_id},
+                                  headers=self.headers)
+        r.raise_for_status()
+        return {(int(a["ams_id"]), int(a["tray_id"])): int(a["spoolman_spool_id"]) for a in r.json()}
+
+    async def assign(self, printer_id: int, ams_id: int, tray_id: int, spool_id: int) -> None:
+        # move=True: the spool also leaves any other AMS slot, in the same transaction.
+        r = await self.client.post(f"{self.base}{self.PATH}", headers=self.headers,
+                                   json={"spoolman_spool_id": spool_id, "printer_id": printer_id,
+                                         "ams_id": ams_id, "tray_id": tray_id, "move": True},
+                                   timeout=20.0)  # waits on the printer's MQTT round trip
+        r.raise_for_status()
+
+    async def unassign(self, spool_id: int) -> None:
+        """Take the spool out of whatever AMS slot it is in (a no-op if it's in none)."""
+        r = await self.client.delete(f"{self.base}{self.PATH}/{spool_id}", headers=self.headers)
+        if r.status_code != 404:
+            r.raise_for_status()
 
 
 def lane_entry(tool: int, spool: dict) -> dict:

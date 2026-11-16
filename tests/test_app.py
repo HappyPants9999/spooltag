@@ -12,7 +12,7 @@ from app.store import Printer, Store
 
 
 class FakeBackends:
-    """Spoolman at host 'spoolman'; Moonraker at hosts 'printer' (SV08) and 'v0'."""
+    """Spoolman at host 'spoolman'; Moonraker at hosts 'printer' (SV08) and 'v0'; Bambuddy at 'bambuddy'."""
 
     def __init__(self):
         self.spools = {
@@ -28,6 +28,9 @@ class FakeBackends:
         self.lanes: dict[str, dict] = {"printer": {}, "v0": {}}
         self.gcode: dict[str, list[str]] = {"printer": [], "v0": []}
         self.down: set[str] = set()
+        self.ams: dict[tuple[int, int, int], int] = {}     # (printer_id, ams_id, tray_id) -> spool id
+        self.bambuddy_calls: list[tuple[str, str, dict]] = []
+        self.bambuddy_error: tuple[int, str] | None = None
 
     def handler(self, request: httpx.Request) -> httpx.Response:
         url = request.url
@@ -64,6 +67,39 @@ class FakeBackends:
             if url.path == "/printer/gcode/script":
                 self.gcode[url.host].append(json.loads(request.content)["script"])
                 return httpx.Response(200, json={"result": "ok"})
+        if url.host == "bambuddy":
+            return self.bambuddy(request)
+        return httpx.Response(500, json={"unexpected": str(url)})
+
+    def bambuddy(self, request: httpx.Request) -> httpx.Response:
+        url = request.url
+        if "bambuddy" in self.down:
+            raise httpx.ConnectError("refused", request=request)
+        if request.headers.get("x-api-key") != "bb_test":
+            return httpx.Response(401, json={"detail": "Invalid API key"})
+        base = "/api/v1/spoolman/inventory/slot-assignments"
+        body = json.loads(request.content) if request.content else {}
+        self.bambuddy_calls.append((request.method, url.path, body))
+        if request.method == "GET" and url.path == base + "/all":
+            pid = int(url.params["printer_id"])
+            return httpx.Response(200, json=[
+                {"printer_id": p, "ams_id": a, "tray_id": t, "spoolman_spool_id": s,
+                 "printer_name": "P1S", "ams_label": None}
+                for (p, a, t), s in self.ams.items() if p == pid])
+        if request.method == "POST" and url.path == base:
+            if self.bambuddy_error:
+                code, detail = self.bambuddy_error
+                return httpx.Response(code, json={"detail": detail})
+            assert body["move"] is True
+            sid = body["spoolman_spool_id"]
+            self.ams = {k: v for k, v in self.ams.items() if v != sid}
+            self.ams[(body["printer_id"], body["ams_id"], body["tray_id"])] = sid
+            return httpx.Response(200, json={"ok": True})
+        m = re.fullmatch(base + r"/(\d+)", url.path)
+        if request.method == "DELETE" and m:
+            sid = int(m.group(1))
+            self.ams = {k: v for k, v in self.ams.items() if v != sid}
+            return httpx.Response(200, json={"id": sid})
         return httpx.Response(500, json={"unexpected": str(url)})
 
 
@@ -254,3 +290,92 @@ def test_no_printers(tmp_path):
     with TestClient(app) as client:
         assert "Add one in Settings" in client.get("/").text
         assert client.get("/t/3").status_code == 404
+
+
+# Bambu AMS via Bambuddy ------------------------------------------------------------------------
+
+@pytest.fixture
+def ams(env):
+    client, fake = env
+    r = client.post("/settings/printers", data={"kind": "bambuddy", "name": "P1S", "slug": "p1s",
+                                                "num_tools": "4", "moonraker_url": "http://bambuddy:8000/",
+                                                "api_key": "bb_test", "remote_id": "3"})
+    assert r.status_code == 200 and "P1S added." in r.text
+    return client, fake
+
+
+def test_ams_slot_assigns_through_bambuddy(ams):
+    client, fake = ams
+    client.get("/s/42"); client.get("/t/sv08/1")                    # start in an SV08 tool
+    client.get("/s/42")
+    r = client.get("/t/p1s/2")
+    assert "✓ Loaded" in r.text and "Bambuddy assigned #42 to P1S AMS 2" in r.text
+    assert fake.ams == {(3, 0, 1): 42}
+    assert fake.spools[42]["location"] == "P1S AMS 2"
+    assert "T1" not in fake.lanes["printer"]                         # one place only
+    assert not any(m == "DELETE" for m, _, _ in fake.bambuddy_calls)  # move=True handled the AMS
+
+
+def test_ams_slot_then_spool_and_replace(ams):
+    client, fake = ams
+    client.get("/s/7"); client.get("/t/p1s/4")
+    assert "Now scan a spool tag" in client.get("/t/p1s/4").text
+    assert "✓ Loaded" in client.get("/s/42").text
+    assert fake.ams == {(3, 0, 3): 42}
+    assert fake.spools[7]["location"] == "Dry rack"                 # pushed out → UNLOAD_LOCATION
+
+
+def test_ams_spool_moved_to_klipper_or_storage_leaves_ams(ams):
+    client, fake = ams
+    client.get("/s/42"); client.get("/t/p1s/1")
+    r = (client.get("/s/42"), client.get("/t/v0/0"))[1]
+    assert "Removed #42 from P1S AMS 1" in r.text and fake.ams == {}
+    client.get("/s/7"); client.get("/t/p1s/3")
+    client.get("/s/7"); client.get("/l/dry-box-1")
+    assert fake.ams == {} and fake.spools[7]["location"] == "Dry box 1"
+
+
+def test_ams_status_tags_clear_and_bounds(ams):
+    client, fake = ams
+    client.get("/s/42"); client.get("/t/p1s/1")
+    page = client.get("/").text
+    assert "AMS via Bambuddy" in page and "AMS 1" in page and "AMS 4" in page and "#42" in page
+    tags = client.get("/tags").text
+    assert all(f"http://spools.lan:7913/t/p1s/{n}" in tags for n in range(1, 5))
+    assert "/t/p1s/0" not in tags
+    assert client.get("/t/p1s/0").status_code == 404 and client.get("/t/p1s/5").status_code == 404
+    client.post("/p/p1s/tools/1/clear")
+    assert fake.ams == {} and fake.spools[42]["location"] == "Dry rack"
+
+
+def test_ams_errors(ams):
+    client, fake = ams
+    fake.bambuddy_error = (400, "Spoolman integration is not enabled")
+    client.get("/s/42")
+    r = client.get("/t/p1s/1")
+    assert "Loaded with problems" in r.text and "Spoolman integration is not enabled" in r.text
+    fake.bambuddy_error = None
+    fake.down.add("bambuddy")
+    client.get("/s/7")
+    r = client.get("/t/sv08/2")                                     # AMS offline doesn't block Klipper
+    assert "✓ Loaded" in r.text and "P1S (Bambuddy) not reachable" in r.text
+    assert "Bambuddy unreachable" in client.get("/").text
+
+
+def test_ams_settings_need_bambuddy_id(env):
+    client, _ = env
+    r = client.post("/settings/printers", data={"kind": "bambuddy", "name": "P1S", "num_tools": "4",
+                                                "moonraker_url": "http://bambuddy:8000"})
+    assert r.status_code == 400 and "id in Bambuddy" in r.text
+
+
+def test_upgrade_adds_printer_kind(tmp_path):
+    import sqlite3
+    db = sqlite3.connect(tmp_path / "spooltag.db")
+    db.execute("CREATE TABLE printers (slug TEXT PRIMARY KEY, name TEXT NOT NULL, moonraker_url TEXT NOT NULL,"
+               " api_key TEXT NOT NULL DEFAULT '', num_tools INTEGER NOT NULL, save_variables INTEGER NOT NULL"
+               " DEFAULT 0, macro_variable INTEGER NOT NULL DEFAULT 0, position INTEGER NOT NULL DEFAULT 0)")
+    db.execute("INSERT INTO printers VALUES ('sv08', 'SV08', 'http://printer:7125', '', 8, 1, 0, 1)")
+    db.commit(); db.close()
+    p = Store(str(tmp_path)).printer("sv08")
+    assert p.kind == "moonraker" and not p.is_ams and list(p.tool_numbers()) == list(range(8))

@@ -6,7 +6,7 @@ from typing import Optional
 import segno
 
 from .clients import spool_label
-from .store import Location, Printer
+from .store import BAMBUDDY, KLIPPER, Location, Printer
 
 CSS = """
 :root{--bg:#f6f6f4;--card:#fff;--fg:#1c1c1a;--dim:#6b6b66;--line:#e2e2dd;--ok:#1f7a3a;--bad:#b3261e;--accent:#2f5bd3}
@@ -130,23 +130,25 @@ def message(title: str, text: str, bad: bool = False) -> str:
 
 def printer_grid(printer: Printer, lanes: dict[int, dict], error: Optional[str]) -> str:
     cards = []
-    for t in range(printer.num_tools):
+    for t in printer.tool_numbers():
         lane = lanes.get(t)
+        label = escape(printer.tool_label(t))
         if lane and lane.get("spool_id"):
-            body = (f'{swatch(lane.get("color"))}<b>T{t}</b>'
+            body = (f'{swatch(lane.get("color"))}<b>{label}</b>'
                     f'<small>#{lane["spool_id"]} {escape(lane.get("vendor_name") or "")} '
                     f'{escape(lane.get("material") or "")}</small>'
                     f'<small>{escape(lane.get("name") or "")}</small>'
                     f'<form method="post" action="/p/{escape(printer.slug)}/tools/{t}/clear" style="margin-top:6px">'
                     f'<button>Clear</button></form>')
         elif lane:
-            body = (f'{swatch(lane.get("color"))}<b>T{t}</b>'
+            body = (f'{swatch(lane.get("color"))}<b>{label}</b>'
                     f'<small>{escape(lane.get("material") or "")} (no spool id)</small>')
         else:
-            body = f'<b>T{t}</b><small>empty</small>'
+            body = f'<b>{label}</b><small>empty</small>'
         cards.append(f'<div class="tool">{body}</div>')
     err = f'<div class="card bad">{escape(error)}</div>' if error else ""
-    return f'<h2>{escape(printer.name)}</h2>{err}<div class="tools">{"".join(cards)}</div>'
+    via = ' <span class="dim">· AMS via Bambuddy</span>' if printer.is_ams else ""
+    return f'<h2>{escape(printer.name)}{via}</h2>{err}<div class="tools">{"".join(cards)}</div>'
 
 
 def status(grids: list[str], locations: list[tuple[Location, int]], pending_text: str, recent) -> str:
@@ -192,8 +194,10 @@ def tags(base: str, printers: list[Printer], locations: list[Location], spools: 
              '<p class="dim" style="margin:.5em 0 0">Tool and storage tags are written once; spool tags '
              'whenever a box gets a new spool.</p></div>']
     for p in printers:
-        cards = "".join(_tag_card(f"{base}/t/{p.slug}/{t}", f"{escape(p.name)} T{t}") for t in range(p.num_tools))
-        parts.append(f'<h2>{escape(p.name)}</h2><details open><summary>{p.num_tools} tool tag'
+        cards = "".join(_tag_card(f"{base}/t/{p.slug}/{t}", f"{escape(p.name)} {escape(p.tool_label(t))}")
+                        for t in p.tool_numbers())
+        what = "AMS slot" if p.is_ams else "tool"
+        parts.append(f'<h2>{escape(p.name)}</h2><details open><summary>{p.num_tools} {what} tag'
                      f'{"" if p.num_tools == 1 else "s"}</summary>{cards}</details>')
     if locations:
         cards = "".join(_tag_card(f"{base}/l/{l.slug}", escape(l.name)) for l in locations)
@@ -231,24 +235,32 @@ def settings(printers: list[Printer], locations: list[Location], notice: str = "
                       if new else f'<input type="hidden" name="slug" value="{escape(p.slug)}">'
                       '<input type="hidden" name="mode" value="edit">')
         chk = lambda on: " checked" if on else ""  # noqa: E731
+        sel = lambda k: " selected" if p.kind == k else ""  # noqa: E731
         return (f'<form method="post" action="/settings/printers">'
+                f'<label>Type</label><select name="kind">'
+                f'<option value="{KLIPPER}"{sel(KLIPPER)}>Klipper printer (Moonraker)</option>'
+                f'<option value="{BAMBUDDY}"{sel(BAMBUDDY)}>Bambu AMS (via Bambuddy, Spoolman mode)</option></select>'
                 f'<div class="grid2"><div><label>Name</label><input name="name" required value="{escape(p.name)}"'
-                f' placeholder="Voron V0"></div><div><label>Tools</label><input name="num_tools" type="number"'
-                f' min="1" max="32" required value="{p.num_tools}"></div></div>'
-                f'<label>Moonraker URL</label><input name="moonraker_url" required value="{escape(p.moonraker_url)}"'
-                f' placeholder="http://10.10.2.50:7125">'
-                f'<label>Moonraker API key (only if this server isn\'t a trusted client)</label>'
-                f'<input name="api_key" value="{escape(p.api_key)}">{slug_field}'
+                f' placeholder="Voron V0"></div><div><label>Tools / AMS slots</label><input name="num_tools"'
+                f' type="number" min="1" max="32" required value="{p.num_tools}"></div></div>'
+                f'<label>Moonraker URL, or Bambuddy URL for an AMS</label><input name="moonraker_url" required'
+                f' value="{escape(p.moonraker_url)}" placeholder="http://10.10.2.50:7125">'
+                f'<label>API key (Moonraker: only if this server isn\'t a trusted client; '
+                f'Bambuddy: a key with Read status + Manage inventory)</label>'
+                f'<input name="api_key" value="{escape(p.api_key)}">'
+                f'<label>Printer id in Bambuddy (AMS only)</label><input name="remote_id" inputmode="numeric"'
+                f' value="{p.remote_id or ""}" placeholder="1">{slug_field}'
                 f'<label class="check"><input type="checkbox" name="save_variables"{chk(p.save_variables)}>'
-                f'SAVE_VARIABLE t&lt;n&gt;__spool_id (needs [save_variables])</label>'
+                f'SAVE_VARIABLE t&lt;n&gt;__spool_id (Klipper only; needs [save_variables])</label>'
                 f'<label class="check"><input type="checkbox" name="macro_variable"{chk(p.macro_variable)}>'
-                f'SET_GCODE_VARIABLE on T&lt;n&gt; macros (needs variable_spool_id)</label>'
+                f'SET_GCODE_VARIABLE on T&lt;n&gt; macros (Klipper only; needs variable_spool_id)</label>'
                 f'<div style="margin-top:10px"><button class="primary">{"Add printer" if new else "Save"}</button></div>'
                 f'</form>')
 
     plist = "".join(
         f'<div class="card"><div class="row"><div><b>{escape(p.name)}</b> <span class="dim">'
-        f'{p.num_tools} tool{"" if p.num_tools == 1 else "s"} · tags /t/{escape(p.slug)}/&lt;n&gt;</span></div>'
+        f'{p.num_tools} {"AMS slot" if p.is_ams else "tool"}{"" if p.num_tools == 1 else "s"}'
+        f'{" via Bambuddy" if p.is_ams else ""} · tags /t/{escape(p.slug)}/&lt;n&gt;</span></div>'
         f'<form method="post" action="/settings/printers/{escape(p.slug)}/delete" '
         f'onsubmit="return confirm(\'Remove {escape(p.name)}? Its tool tags stop working.\')">'
         f'<button class="danger">Remove</button></form></div>'

@@ -3,6 +3,7 @@
 Tag routes (opened by tapping an NFC tag)
   GET  /s/{spool_id}              spool tag            e.g. /s/42
   GET  /t/{printer}/{tool}        printer tool tag     e.g. /t/sv08/3, /t/v0/0
+                                  or AMS slot tag      e.g. /t/p1s/1 .. /t/p1s/4 (via Bambuddy)
   GET  /t/{tool}                  tool of the first printer (0.1 tags)
   GET  /l/{location}              storage tag          e.g. /l/dry-box-1
 A spool scan pairs with a tool or storage scan, in either order, within PENDING_TIMEOUT seconds.
@@ -25,7 +26,7 @@ from . import pages
 from .clients import Spoolman
 from .config import Settings, load_settings
 from .service import Service
-from .store import SLUG_RE, Location, Printer, Store, slugify
+from .store import BAMBUDDY, KLIPPER, SLUG_RE, Location, Printer, Store, slugify
 
 
 def create_app(settings: Optional[Settings] = None,
@@ -59,8 +60,11 @@ def create_app(settings: Optional[Settings] = None,
         if printer is None:
             return None, None, f"No printer '{printer_slug}' in Settings."
         raw = tool.strip().lstrip("tT")
-        if not raw.isdigit() or not 0 <= int(raw) < printer.num_tools:
-            return None, None, f"'{tool}' isn't a tool of {printer.name} (T0–T{printer.num_tools - 1})."
+        numbers = printer.tool_numbers()
+        if not raw.isdigit() or int(raw) not in numbers:
+            what = "an AMS slot" if printer.is_ams else "a tool"
+            span = f"{printer.tool_label(numbers[0])}–{printer.tool_label(numbers[-1])}"
+            return None, None, f"'{tool}' isn't {what} of {printer.name} ({span})."
         return printer, int(raw), ""
 
     def pending_text(service: Service) -> str:
@@ -224,14 +228,23 @@ def create_app(settings: Optional[Settings] = None,
     async def save_printer(request: Request, name: str = Form(...), num_tools: int = Form(...),
                            moonraker_url: str = Form(...), api_key: str = Form(""), slug: str = Form(""),
                            mode: str = Form("add"), save_variables: Optional[str] = Form(None),
-                           macro_variable: Optional[str] = Form(None)):
+                           macro_variable: Optional[str] = Form(None), kind: str = Form(KLIPPER),
+                           remote_id: str = Form("")):
         store = svc(request).store
         name, url = name.strip(), moonraker_url.strip().rstrip("/")
+        if kind not in (KLIPPER, BAMBUDDY):
+            return settings_page(request, error="Unknown printer type.", code=400)
+        rid = 0
+        if kind == BAMBUDDY:
+            if not remote_id.strip().isdigit() or int(remote_id) < 1:
+                return settings_page(request, error="Give the printer's id in Bambuddy (a number, "
+                                                    "shown by /api/v1/printers/).", code=400)
+            rid = int(remote_id)
         slug = slug.strip().lower() or slugify(name)
         if not name:
             return settings_page(request, error="Give the printer a name.", code=400)
         if not url.startswith(("http://", "https://")):
-            return settings_page(request, error="Moonraker URL must start with http:// or https://", code=400)
+            return settings_page(request, error="The URL must start with http:// or https://", code=400)
         if not 1 <= num_tools <= 32:
             return settings_page(request, error="Tools must be between 1 and 32.", code=400)
         if not SLUG_RE.match(slug):
@@ -242,8 +255,10 @@ def create_app(settings: Optional[Settings] = None,
         if mode != "edit" and existing is not None:
             return settings_page(request, error=f"The id '{slug}' is already used by {existing.name}; "
                                                 f"pick another short id.", code=400)
+        ams = kind == BAMBUDDY
         store.save_printer(Printer(slug, name, url, api_key.strip(), num_tools,
-                                   save_variables is not None, macro_variable is not None))
+                                   save_variables is not None and not ams,
+                                   macro_variable is not None and not ams, kind, rid))
         return saved(f"{name} {'saved' if mode == 'edit' else 'added'}.")
 
     @app.post("/settings/printers/{slug}/delete")
