@@ -1,6 +1,5 @@
-# Paste into a new Dockhand stack. Fill in the <...> value.
-# Everything else (Spoolman URL, tag base URL, locations, timeout, time zone, printers and
-# storage) is set on the /settings page and kept in /data/spooltag.db.
+# Paste into a new Dockhand stack. Everything else (Spoolman URL, tag base URL, printers,
+# storage, admin password) is set on the /settings page and kept in /data/spooltag.db.
 services:
   spooltag:
     image: ghcr.io/happypants9999/spooltag:latest
@@ -8,12 +7,21 @@ services:
     container_name: spooltag
     restart: unless-stopped
     ports:
-      - "7913:8000"
+      - "7913:8000"                        # or "10.10.2.176:7913:8000" to listen on one interface only
     volumes:
       - /appdata/spooltag:/data            # local disk, not an Unraid share
-    # Optional starting values for a brand-new install, read only for settings the database
-    # doesn't have yet. Once saved on /settings, these are ignored and can be deleted.
+    # Hardening. The container starts as root only long enough to give /data to the service
+    # user (10001), then drops root and every capability before the web server starts.
+    read_only: true
+    tmpfs:
+      - /tmp
+    cap_drop: [ALL]
+    cap_add: [CHOWN, DAC_OVERRIDE, FOWNER, SETGID, SETUID]   # start-up only; all dropped with root
+    security_opt:
+      - no-new-privileges:true
     # environment:
-    #   SPOOLMAN_URL: http://<docker-vm-ip>:7912
-    #   BASE_URL: http://<docker-vm-ip>:7913
-    #   TZ: America/Denver
+    #   PUID: "10001"          # user/group the server runs as (e.g. 99/100 on Unraid)
+    #   PGID: "10001"
+    #   ALLOWED_HOSTS: ""      # extra host names, read every start (a way back in if you lock yourself out)
+    #   ADMIN_PASSWORD: ""     # only used when no admin password is set yet
+    #   SPOOLMAN_URL / BASE_URL / TZ: starting values for a brand-new install only

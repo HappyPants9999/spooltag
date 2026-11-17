@@ -4,34 +4,101 @@ on:
   push:
     branches: [main]
     tags: ["v*"]
+  pull_request:          # tests + container smoke test only; nothing is published
   workflow_dispatch:
 
+# Least privilege by default; only the publish job may write packages.
 permissions:
   contents: read
-  packages: write
 
 jobs:
-  build:
+  test:
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
-
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+        with:
+          persist-credentials: false
+      - uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065 # v5.6.0
+        with:
+          python-version: "3.12"
       - name: Run tests
         run: |
-          pip install -r requirements.txt pytest
+          pip install -r requirements-dev.txt
           pytest -q
 
-      - uses: docker/setup-qemu-action@v3
-      - uses: docker/setup-buildx-action@v3
+  smoke:
+    # Builds the image and runs it the way compose.yaml does, starting from a root-owned
+    # 0.3-style data folder, to prove the non-root migration and the scan guards end to end.
+    needs: test
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+        with:
+          persist-credentials: false
+      - name: Build
+        run: docker build -t spooltag:ci .
+      - name: Create a root-owned, world-readable database like spooltag 0.3 left
+        run: |
+          sudo mkdir -p /tmp/st
+          docker run --rm --user 0 --entrypoint python -v /tmp/st:/data spooltag:ci -c \
+            "from app.store import Store, Printer; Store('/data').save_printer(Printer('sv08','SV08','http://10.0.0.20:7125','key',8,False,False))"
+          sudo chmod 755 /tmp/st && sudo chmod 644 /tmp/st/spooltag.db
+          sudo stat -c '%U %a %n' /tmp/st /tmp/st/spooltag.db
+      - name: Start hardened
+        run: |
+          docker run -d --name st -p 7913:8000 --read-only --tmpfs /tmp \
+            --cap-drop ALL --cap-add CHOWN --cap-add DAC_OVERRIDE --cap-add FOWNER --cap-add SETGID --cap-add SETUID \
+            --security-opt no-new-privileges:true -v /tmp/st:/data spooltag:ci
+          for i in $(seq 30); do curl -fs http://127.0.0.1:7913/healthz && break; sleep 1; done
+          curl -fs http://127.0.0.1:7913/healthz
+      - name: Check user, capabilities, file ownership and modes
+        run: |
+          set -x
+          test "$(docker exec st awk '/^Uid:/{print $2}' /proc/1/status)" = 10001
+          test "$(docker exec st awk '/^CapEff:/{print $2}' /proc/1/status)" = 0000000000000000
+          test "$(sudo stat -c '%u:%g %a' /tmp/st)" = "10001:10001 700"
+          test "$(sudo stat -c '%u:%g %a' /tmp/st/spooltag.db)" = "10001:10001 600"
+          curl -fs http://127.0.0.1:7913/settings | grep -q 'SV08'
+      - name: Check request guards
+        run: |
+          set -x
+          code() { curl -s -o /dev/null -w '%{http_code}' "$@"; }
+          # A website's hidden <img> can't trigger a scan; its navigation only gets a confirm page.
+          test "$(code -H 'Sec-Fetch-Site: cross-site' -H 'Sec-Fetch-Mode: no-cors' -H 'Sec-Fetch-Dest: image' http://127.0.0.1:7913/t/sv08/1)" = 403
+          curl -fs -H 'Sec-Fetch-Site: cross-site' -H 'Sec-Fetch-Mode: navigate' -H 'Sec-Fetch-Dest: document' http://127.0.0.1:7913/t/sv08/1 | grep -q 'Confirm this scan'
+          # An NFC tag tap is a browser-initiated navigation and acts at once.
+          curl -fs -H 'Sec-Fetch-Site: none' -H 'Sec-Fetch-Mode: navigate' -H 'Sec-Fetch-Dest: document' http://127.0.0.1:7913/t/sv08/1 | grep -q 'Now scan a spool'
+          # Cross-site POST, DNS-rebinding Host, and framing.
+          test "$(code -X POST -H 'Origin: https://evil.example' -d 'name=x' http://127.0.0.1:7913/settings/locations)" = 403
+          test "$(code -H 'Host: rebind.evil.example' http://127.0.0.1:7913/settings)" = 400
+          curl -sI http://127.0.0.1:7913/ | grep -qi "frame-ancestors 'none'"
+      - name: Logs
+        if: always()
+        run: docker logs st || true
 
-      - uses: docker/login-action@v3
+  publish:
+    needs: [test, smoke]
+    if: github.event_name != 'pull_request'
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      packages: write
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+        with:
+          persist-credentials: false
+
+      - uses: docker/setup-qemu-action@c7c53464625b32c7a7e944ae62b3e17d2b600130 # v3.7.0
+      - uses: docker/setup-buildx-action@8d2750c68a42422c14e847fe6c8ac0403b4cbd6f # v3.12.0
+
+      - uses: docker/login-action@c94ce9fb468520275223c153574b00df6fe4bcc9 # v3.7.0
         with:
           registry: ghcr.io
           username: ${{ github.actor }}
           password: ${{ secrets.GITHUB_TOKEN }}
 
       - id: meta
-        uses: docker/metadata-action@v5
+        uses: docker/metadata-action@c299e40c65443455700f0fdfc63efafe5b349051 # v5.10.0
         with:
           images: ghcr.io/${{ github.repository }}
           tags: |
@@ -39,7 +106,7 @@ jobs:
             type=sha,format=short
             type=semver,pattern={{version}}
 
-      - uses: docker/build-push-action@v6
+      - uses: docker/build-push-action@10e90e3645eae34f1e60eeb005ba3a3d33f178e8 # v6.19.2
         with:
           context: .
           platforms: linux/amd64,linux/arm64

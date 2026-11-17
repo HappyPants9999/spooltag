@@ -4,11 +4,36 @@ import re
 
 import httpx
 import pytest
-from fastapi.testclient import TestClient
 
 from app.config import LegacyPrinter, Settings
-from app.main import create_app
+from app.main import create_app as _create_app
 from app.store import Printer, Store
+
+BASE = "http://spools.lan:7913"
+# Fake DNS: every backend name is on the LAN, so the outgoing-request guard lets it through.
+FAKE_DNS = {"spoolman": "10.0.0.10", "printer": "10.0.0.20", "v0": "10.0.0.21", "bambuddy": "10.0.0.30",
+            "x": "10.0.0.40", "b": "10.0.0.41", "metadata.evil": "169.254.169.254", "public.example": "93.184.215.14"}
+
+
+async def fake_resolve(host: str, port: int) -> list[str]:
+    if host in FAKE_DNS:
+        return [FAKE_DNS[host]]
+    raise OSError(f"unknown host {host}")
+
+
+def create_app(s, transport=None, resolver=fake_resolve):
+    return _create_app(s, transport=transport, resolver=resolver)
+
+
+def TestClient(app, **kw):  # noqa: N802 - every test client talks to the app by its real host name
+    from fastapi.testclient import TestClient as _TC
+    kw.setdefault("base_url", BASE)
+    return _TC(app, **kw)
+
+
+def backend_host(request: httpx.Request) -> str:
+    """Connections are pinned to the checked IP, so the backend name is in the Host header."""
+    return request.headers["host"].split(":")[0]
 
 
 class FakeBackends:
@@ -34,7 +59,8 @@ class FakeBackends:
 
     def handler(self, request: httpx.Request) -> httpx.Response:
         url = request.url
-        if url.host == "spoolman":
+        host = backend_host(request)
+        if host == "spoolman":
             m = re.fullmatch(r"/api/v1/spool/(\d+)", url.path)
             if m:
                 sid = int(m.group(1))
@@ -48,10 +74,10 @@ class FakeBackends:
                 if "location" in url.params:
                     spools = [s for s in spools if s.get("location") == url.params["location"]]
                 return httpx.Response(200, json=spools)
-        if url.host in self.lanes:
-            if url.host in self.down:
+        if host in self.lanes:
+            if host in self.down:
                 raise httpx.ConnectError("refused", request=request)
-            lanes = self.lanes[url.host]
+            lanes = self.lanes[host]
             if url.path == "/server/database/item":
                 if request.method == "GET":
                     if not lanes:
@@ -65,9 +91,9 @@ class FakeBackends:
                     lanes.pop(url.params["key"], None)
                     return httpx.Response(200, json={"result": {}})
             if url.path == "/printer/gcode/script":
-                self.gcode[url.host].append(json.loads(request.content)["script"])
+                self.gcode[host].append(json.loads(request.content)["script"])
                 return httpx.Response(200, json={"result": "ok"})
-        if url.host == "bambuddy":
+        if host == "bambuddy":
             return self.bambuddy(request)
         return httpx.Response(500, json={"unexpected": str(url)})
 
@@ -265,8 +291,9 @@ def test_upgrade_from_01_database(tmp_path):
     db.commit(); db.close()
     store = Store(str(tmp_path))
     assert store.recent()[0][2] == "T3"
-    store.set_pending("spool", "42")
-    assert store.get_pending(60).ref == "42"
+    store.set_pending("phone-a", "spool", "42")
+    assert store.get_pending("phone-a", 60).ref == "42"
+    assert store.get_pending("phone-b", 60) is None
 
 
 def test_label_skips_name_equal_to_material():
@@ -385,7 +412,7 @@ def test_upgrade_adds_printer_kind(tmp_path):
 
 GENERAL = {"spoolman_url": "http://spoolman:8000/", "base_url": "http://tags.lan:7913",
            "location_format": "{printer} tool {tool}", "unload_location": "Shelf",
-           "pending_timeout": "300", "timezone": "America/Denver"}
+           "pending_timeout": "300", "timezone": "America/Denver", "extra_hosts": "spools.lan"}
 
 
 def test_general_settings_saved_and_applied(env):

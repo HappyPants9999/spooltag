@@ -1,4 +1,9 @@
-"""SQLite store: general settings, printers, storage locations, the one pending scan, and a log."""
+"""SQLite store: general settings, admin sessions, printers, storage locations, each device's
+pending scan, and a log.
+
+The database file and its directory are kept private to the service user (0600 / 0700): they
+hold the Moonraker/Bambuddy API keys in plain text."""
+import contextlib
 import os
 import re
 import sqlite3
@@ -66,16 +71,35 @@ class Pending:
     ts: float
 
 
+def _private(path: str, mode: int) -> None:
+    """chmod if we own the file; an existing install's root-owned files are fixed by the entrypoint."""
+    with contextlib.suppress(OSError):
+        if os.stat(path).st_uid == os.geteuid():
+            os.chmod(path, mode)
+
+
 class Store:
     def __init__(self, data_dir: str):
-        os.makedirs(data_dir, exist_ok=True)
+        os.makedirs(data_dir, mode=0o700, exist_ok=True)
+        _private(data_dir, 0o700)
         self.path = os.path.join(data_dir, "spooltag.db")
+        old_umask = os.umask(0o077)          # new database and journal files: owner only
+        try:
+            self._init_schema()
+        finally:
+            os.umask(old_umask)
+        for suffix in ("", "-journal", "-wal", "-shm"):
+            if os.path.exists(self.path + suffix):
+                _private(self.path + suffix, 0o600)
+
+    def _init_schema(self) -> None:
         with self._conn() as db:
-            cols = [r[1] for r in db.execute("PRAGMA table_info(pending)")]
-            if cols and "ref" not in cols:          # 0.1 schema: pending is transient, just rebuild
-                db.execute("DROP TABLE pending")
-            db.execute("CREATE TABLE IF NOT EXISTS pending (id INTEGER PRIMARY KEY CHECK (id = 1),"
+            # Pending scans are transient: the single-slot tables of 0.1-0.3 are just dropped.
+            db.execute("DROP TABLE IF EXISTS pending")
+            db.execute("CREATE TABLE IF NOT EXISTS scan_pending (device TEXT PRIMARY KEY,"
                        " kind TEXT NOT NULL, ref TEXT NOT NULL, ts REAL NOT NULL)")
+            db.execute("CREATE TABLE IF NOT EXISTS sessions (token_hash TEXT PRIMARY KEY,"
+                       " expires REAL NOT NULL)")
             db.execute("CREATE TABLE IF NOT EXISTS log (ts REAL NOT NULL, spool_id INTEGER,"
                        " tool INTEGER, action TEXT NOT NULL, detail TEXT)")
             if "target" not in [r[1] for r in db.execute("PRAGMA table_info(log)")]:
@@ -86,7 +110,7 @@ class Store:
                        " macro_variable INTEGER NOT NULL DEFAULT 0, position INTEGER NOT NULL DEFAULT 0)")
             pcols = [r[1] for r in db.execute("PRAGMA table_info(printers)")]
             if "kind" not in pcols:
-                db.execute(f"ALTER TABLE printers ADD COLUMN kind TEXT NOT NULL DEFAULT '{KLIPPER}'")
+                db.execute("ALTER TABLE printers ADD COLUMN kind TEXT NOT NULL DEFAULT 'moonraker'")
             if "remote_id" not in pcols:
                 db.execute("ALTER TABLE printers ADD COLUMN remote_id INTEGER NOT NULL DEFAULT 0")
             db.execute("CREATE TABLE IF NOT EXISTS settings (key TEXT PRIMARY KEY, value TEXT NOT NULL)")
@@ -96,6 +120,21 @@ class Store:
     def _conn(self) -> sqlite3.Connection:
         return sqlite3.connect(self.path)
 
+    @contextlib.contextmanager
+    def _write_txn(self):
+        """An IMMEDIATE transaction: concurrent writers wait instead of interleaving."""
+        db = sqlite3.connect(self.path, isolation_level=None, timeout=10)
+        try:
+            db.execute("BEGIN IMMEDIATE")
+            try:
+                yield db
+                db.execute("COMMIT")
+            except BaseException:
+                db.execute("ROLLBACK")
+                raise
+        finally:
+            db.close()
+
     # General settings ----------------------------------------------------------------------
 
     def settings(self) -> dict[str, str]:
@@ -103,9 +142,39 @@ class Store:
             return dict(db.execute("SELECT key, value FROM settings").fetchall())
 
     def save_settings(self, values: dict[str, str], only_missing: bool = False) -> None:
-        verb = "INSERT OR IGNORE" if only_missing else "INSERT OR REPLACE"
+        sql = ("INSERT OR IGNORE INTO settings (key, value) VALUES (?, ?)" if only_missing else
+               "INSERT OR REPLACE INTO settings (key, value) VALUES (?, ?)")
         with self._conn() as db:
-            db.executemany(f"{verb} INTO settings (key, value) VALUES (?, ?)", list(values.items()))
+            db.executemany(sql, list(values.items()))
+
+    def get_setting(self, key: str) -> str:
+        with self._conn() as db:
+            row = db.execute("SELECT value FROM settings WHERE key = ?", (key,)).fetchone()
+        return row[0] if row else ""
+
+    def delete_setting(self, key: str) -> None:
+        with self._conn() as db:
+            db.execute("DELETE FROM settings WHERE key = ?", (key,))
+
+    # Admin sessions (only the SHA-256 of each token is stored) ---------------------------
+
+    def add_session(self, token_hash: str, expires: float) -> None:
+        with self._conn() as db:
+            db.execute("DELETE FROM sessions WHERE expires < ?", (time.time(),))
+            db.execute("INSERT INTO sessions (token_hash, expires) VALUES (?, ?)", (token_hash, expires))
+
+    def session_valid(self, token_hash: str) -> bool:
+        with self._conn() as db:
+            row = db.execute("SELECT expires FROM sessions WHERE token_hash = ?", (token_hash,)).fetchone()
+        return bool(row and row[0] > time.time())
+
+    def delete_session(self, token_hash: str) -> None:
+        with self._conn() as db:
+            db.execute("DELETE FROM sessions WHERE token_hash = ?", (token_hash,))
+
+    def delete_all_sessions(self) -> None:
+        with self._conn() as db:
+            db.execute("DELETE FROM sessions")
 
     # Printers ------------------------------------------------------------------------------
 
@@ -157,27 +226,34 @@ class Store:
         with self._conn() as db:
             db.execute("DELETE FROM locations WHERE slug = ?", (slug,))
 
-    # Pending scan --------------------------------------------------------------------------
+    # Pending scans: one per device (browser cookie), so people scanning at once don't mix ----
 
-    def set_pending(self, kind: str, ref: str) -> None:
-        with self._conn() as db:
-            db.execute("INSERT OR REPLACE INTO pending (id, kind, ref, ts) VALUES (1, ?, ?, ?)",
-                       (kind, ref, time.time()))
+    def set_pending(self, device: str, kind: str, ref: str) -> None:
+        with self._write_txn() as db:
+            db.execute("INSERT OR REPLACE INTO scan_pending (device, kind, ref, ts) VALUES (?, ?, ?, ?)",
+                       (device, kind, ref, time.time()))
 
-    def get_pending(self, timeout: int) -> Optional[Pending]:
+    def get_pending(self, device: str, timeout: int) -> Optional[Pending]:
         with self._conn() as db:
-            row = db.execute("SELECT kind, ref, ts FROM pending WHERE id = 1").fetchone()
-        if row is None:
+            row = db.execute("SELECT kind, ref, ts FROM scan_pending WHERE device = ?", (device,)).fetchone()
+        if row is None or time.time() - row[2] > timeout:
             return None
-        pending = Pending(*row)
-        if time.time() - pending.ts > timeout:
-            self.clear_pending()
-            return None
-        return pending
+        return Pending(*row)
 
-    def clear_pending(self) -> None:
-        with self._conn() as db:
-            db.execute("DELETE FROM pending")
+    def take_pending(self, device: str, timeout: int, kinds: tuple[str, ...]) -> Optional[Pending]:
+        """Atomically remove and return this device's pending scan if it is one of `kinds`, so two
+        requests can never both pair with the same first scan. Expired scans are purged."""
+        with self._write_txn() as db:
+            db.execute("DELETE FROM scan_pending WHERE ts < ?", (time.time() - max(timeout, 0),))
+            row = db.execute("SELECT kind, ref, ts FROM scan_pending WHERE device = ?", (device,)).fetchone()
+            if row is None or row[0] not in kinds or time.time() - row[2] > timeout:
+                return None
+            db.execute("DELETE FROM scan_pending WHERE device = ?", (device,))
+        return Pending(*row)
+
+    def clear_pending(self, device: str) -> None:
+        with self._write_txn() as db:
+            db.execute("DELETE FROM scan_pending WHERE device = ?", (device,))
 
     # Log -----------------------------------------------------------------------------------
 

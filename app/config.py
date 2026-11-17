@@ -5,10 +5,15 @@ only starting values: on first start each general setting missing from the datab
 from its variable (SPOOLMAN_URL, BASE_URL, ...), and the old single-printer variables
 (MOONRAKER_URL, NUM_TOOLS, PRINTER_NAME, ...) become the first printer if there are none.
 After that the database wins and the variables can be removed from the compose file.
-Only DATA_DIR, which says where the database is, has to stay an environment variable.
+
+Read on every start (never stored):
+  DATA_DIR        where the database lives (the image sets /data)
+  ALLOWED_HOSTS   extra host names the web UI answers to, comma-separated; "*" turns the Host
+                  check off. A way back in if a host name was left out of Settings.
+  ADMIN_PASSWORD  sets the admin password only if none is set yet
 """
 import os
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
 
@@ -32,6 +37,20 @@ def valid_timezone(name: str) -> bool:
         return False
 
 
+def split_hosts(text: str) -> list[str]:
+    """'a.lan, b  c' -> ['a.lan', 'b', 'c'] (lower-cased, ports and brackets removed)."""
+    out = []
+    for part in text.replace(",", " ").split():
+        host = part.strip().lower()
+        if host.startswith("["):
+            host = host[1:].split("]", 1)[0]
+        elif host.count(":") == 1:
+            host = host.split(":", 1)[0]
+        if host:
+            out.append(host)
+    return out
+
+
 @dataclass(frozen=True)
 class LegacyPrinter:
     """The pre-0.2 single printer from env vars, used only to seed an empty printer list."""
@@ -44,7 +63,8 @@ class LegacyPrinter:
 
 
 # General settings kept in the database, in the order the Settings page shows them.
-GENERAL = ("spoolman_url", "base_url", "location_format", "unload_location", "pending_timeout", "timezone")
+GENERAL = ("spoolman_url", "base_url", "location_format", "unload_location", "pending_timeout", "timezone",
+           "extra_hosts", "allow_public_urls")
 
 
 @dataclass
@@ -58,12 +78,16 @@ class Settings:
     data_dir: str
     legacy_printer: LegacyPrinter | None = None
     timezone: str = ""      # IANA name, e.g. America/Denver; empty = the container's local time
+    extra_hosts: str = ""   # host names (besides IP addresses and the tag base URL's) the UI answers to
+    allow_public_urls: bool = False   # service URLs may point at public internet addresses
+    env_allowed_hosts: list[str] = field(default_factory=list)   # ALLOWED_HOSTS; not stored
+    admin_password_seed: str = ""     # ADMIN_PASSWORD; not stored as text
 
     def location_for(self, printer_name: str, tool: int) -> str:
         return self.location_format.format(printer=printer_name, tool=tool)
 
     def general(self) -> dict[str, str]:
-        return {k: str(getattr(self, k)) for k in GENERAL}
+        return {k: ("1" if v else "0") if isinstance(v := getattr(self, k), bool) else str(v) for k in GENERAL}
 
     def apply(self, values: dict[str, str]) -> None:
         """Set general settings from stored strings (unknown keys are ignored)."""
@@ -75,10 +99,22 @@ class Settings:
                     self.pending_timeout = int(value)
                 except ValueError:
                     continue
+            elif key == "allow_public_urls":
+                self.allow_public_urls = value.strip().lower() in ("1", "true", "yes", "on")
             elif key.endswith("_url"):
                 setattr(self, key, value.strip().rstrip("/"))
             else:
                 setattr(self, key, value)
+
+    def allowed_hosts(self) -> set[str]:
+        """Host names (not IP addresses, which are always allowed) the web UI answers to."""
+        from urllib.parse import urlsplit
+        hosts = {"localhost"} | set(split_hosts(self.extra_hosts)) | set(self.env_allowed_hosts)
+        if self.base_url:
+            host = urlsplit(self.base_url).hostname
+            if host:
+                hosts.add(host.lower())
+        return hosts
 
 
 def load_settings() -> Settings:
@@ -103,4 +139,8 @@ def load_settings() -> Settings:
         data_dir=os.environ.get("DATA_DIR", "/data"),
         legacy_printer=legacy,
         timezone=os.environ.get("TZ", "").strip(),
+        extra_hosts="",
+        allow_public_urls=_bool("ALLOW_PUBLIC_URLS", False),
+        env_allowed_hosts=split_hosts(os.environ.get("ALLOWED_HOSTS", "").replace("*", " * ")),
+        admin_password_seed=os.environ.get("ADMIN_PASSWORD", ""),
     )
