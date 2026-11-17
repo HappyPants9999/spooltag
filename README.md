@@ -12,7 +12,7 @@ spooltag is a small web service for Klipper printers, built for an 8-tool INDX o
 
 Housekeeping:
 - **A spool is in one place only.** Loading it into a tool, on any printer, or storing it in a location removes it from whatever tool it was in before.
-- The spool a new scan pushes out of a tool is moved to `UNLOAD_LOCATION`.
+- The spool a new scan pushes out of a tool is moved to the unload location set in Settings.
 - The `T<n>` key matches Mainsail's, so picking a spool in Mainsail overwrites the same record instead of creating a duplicate.
 - **Bambu AMS slots go through Bambuddy.** Scanning a spool and an AMS slot tag asks Bambuddy to assign that Spoolman spool to the slot (see below).
 
@@ -35,25 +35,30 @@ Anyone on your LAN who can reach the page can change Settings, so keep the port 
 
 1. Push this repo to GitHub. The **Build image** workflow runs the tests and publishes `ghcr.io/happypants9999/spooltag:latest` for amd64 and arm64.
 2. After the first build, open GitHub → your profile → **Packages → spooltag → Package settings** and set its visibility to **Public**. Otherwise you have to log in to GHCR on the Docker VM.
-3. In Dockhand, create a stack from [`compose.yaml`](compose.yaml) and fill in the `<…>` values.
-4. In `moonraker.conf`, add the Docker VM's IP to `[authorization] trusted_clients`, or set `MOONRAKER_API_KEY`.
+3. In Dockhand, create a stack from [`compose.yaml`](compose.yaml).
+4. Open `/settings` and fill in **General** (Spoolman URL and tag base URL first), then add printers and storage locations.
+5. In `moonraker.conf`, add the Docker VM's IP to `[authorization] trusted_clients`, or give the printer an API key in Settings.
 
 To update after a code change: push to GitHub, wait for the build, then redeploy the stack in Dockhand (pull the latest image).
 
 ## Settings
 
-Printers and storage locations are managed on the **/settings** page and stored in `/data/spooltag.db`. Each Klipper printer has its own Moonraker URL, an optional API key, a tool count, and the two Klipper-variable switches. A Bambu AMS has a Bambuddy URL, API key and printer id instead.
+Everything is set on the **/settings** page and stored in `/data/spooltag.db`; the compose file only needs the image, port and data volume.
 
-Environment variables:
+**General** (top of the page):
 
-| Variable | Default | |
+| Setting | Default | |
 |---|---|---|
-| `SPOOLMAN_URL` | `http://spoolman:8000` | Spoolman's base URL |
-| `BASE_URL` | the request's host | the URL written onto tags. **Keep it stable**, because changing it breaks every tag |
-| `LOCATION_FORMAT` | `{printer} T{tool}` | Spoolman location for a loaded spool |
-| `UNLOAD_LOCATION` | *(empty = leave as is)* | location for a spool that's replaced or cleared |
-| `PENDING_TIMEOUT` | `120` | seconds to wait for the second scan |
-| `MOONRAKER_URL`, `PRINTER_NAME`, `NUM_TOOLS`, `MOONRAKER_API_KEY`, `KLIPPER_SAVE_VARIABLES`, `KLIPPER_MACRO_VARIABLE` | | **Only read when the printer list is empty**, to create the first printer. After that, edit the printer in Settings. |
+| Spoolman URL | `http://spoolman:8000` | Spoolman's base URL |
+| Tag base URL | the request's host | the URL written onto tags. **Keep it stable**, because changing it breaks every tag already written |
+| Spoolman location for a tool | `{printer} T{tool}` | location text for a loaded spool |
+| Location for a replaced or cleared spool | *(empty = leave as is)* | e.g. `Dry rack` |
+| Seconds to wait for the second scan | `120` | 10–3600 |
+| Time zone | the container's | for the scan log on `/`, e.g. `America/Denver` |
+
+**Printers:** each Klipper printer has its own Moonraker URL, an optional API key, a tool count, and the two Klipper-variable switches. A Bambu AMS has a Bambuddy URL, API key and printer id instead.
+
+**Environment variables** are only starting values for a new install. On start, any general setting the database doesn't have yet is taken from `SPOOLMAN_URL`, `BASE_URL`, `LOCATION_FORMAT`, `UNLOAD_LOCATION`, `PENDING_TIMEOUT` or `TZ`, and if there are no printers, `MOONRAKER_URL`, `PRINTER_NAME`, `NUM_TOOLS`, `MOONRAKER_API_KEY`, `KLIPPER_SAVE_VARIABLES` and `KLIPPER_MACRO_VARIABLE` create the first one. After that the Settings page wins and the variables can be removed. Only `DATA_DIR` (set to `/data` in the image) is read every time.
 
 ### Bambu AMS via Bambuddy
 
@@ -64,7 +69,7 @@ Add the AMS as a printer of type **Bambu AMS (via Bambuddy)**:
 - **Printer id in Bambuddy:** the `id` from Bambuddy's `GET /api/v1/printers/`.
 - **Tools / AMS slots:** 4 per AMS unit. Slot tags are numbered from 1, like the AMS itself: `/t/p1s/1` is AMS slot 1 (Bambuddy `ams_id 0`, `tray_id 0`). With more than one AMS, slot 5 is the second unit's first slot.
 
-Bambuddy must be in Spoolman mode. On a scan, spooltag calls `POST /api/v1/spoolman/inventory/slot-assignments` with `move: true`. Bambuddy saves the assignment and configures the slot over MQTT (type, colour, preset, K-profile), the same as assigning it in Bambuddy's UI. spooltag then sets the Spoolman location (e.g. `P1S AMS 2`), which Bambuddy leaves alone, and moves any spool it replaced to `UNLOAD_LOCATION`. Loading the spool into a Klipper tool or storing it calls `DELETE …/slot-assignments/<spool id>`.
+Bambuddy must be in Spoolman mode. On a scan, spooltag calls `POST /api/v1/spoolman/inventory/slot-assignments` with `move: true`. Bambuddy saves the assignment and configures the slot over MQTT (type, colour, preset, K-profile), the same as assigning it in Bambuddy's UI. spooltag then sets the Spoolman location (e.g. `P1S AMS 2`), which Bambuddy leaves alone, and moves any spool it replaced to the unload location. Loading the spool into a Klipper tool or storing it calls `DELETE …/slot-assignments/<spool id>`.
 
 Load the spool into the AMS **before** scanning: if the printer reports the slot as empty, Bambuddy saves the assignment but doesn't configure the slot.
 

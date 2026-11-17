@@ -379,3 +379,48 @@ def test_upgrade_adds_printer_kind(tmp_path):
     db.commit(); db.close()
     p = Store(str(tmp_path)).printer("sv08")
     assert p.kind == "moonraker" and not p.is_ams and list(p.tool_numbers()) == list(range(8))
+
+
+# General settings ----------------------------------------------------------------------------
+
+GENERAL = {"spoolman_url": "http://spoolman:8000/", "base_url": "http://tags.lan:7913",
+           "location_format": "{printer} tool {tool}", "unload_location": "Shelf",
+           "pending_timeout": "300", "timezone": "America/Denver"}
+
+
+def test_general_settings_saved_and_applied(env):
+    client, fake = env
+    page = client.get("/settings").text
+    assert page.index("General") < page.index("Printers") and 'value="http://spools.lan:7913"' in page
+    r = client.post("/settings/general", data=GENERAL)
+    assert r.status_code == 200 and "General settings saved." in r.text
+    assert 'value="America/Denver"' in r.text and 'value="Shelf"' in r.text
+    assert "http://tags.lan:7913/t/sv08/0" in client.get("/tags").text
+    client.get("/s/42")
+    assert "Loaded" in client.get("/t/sv08/2").text
+    assert fake.spools[42]["location"] == "SV08 tool 2"
+    client.get("/s/7")
+    client.get("/t/sv08/2")
+    assert fake.spools[42]["location"] == "Shelf"          # the replaced spool's unload location
+
+
+def test_general_settings_validation(env):
+    client, _ = env
+    for key, value in (("spoolman_url", "spoolman:8000"), ("base_url", "tags.lan"),
+                       ("location_format", "{printer} {slot}"), ("location_format", "{0}"),
+                       ("pending_timeout", "5"), ("pending_timeout", "abc"), ("timezone", "Mars/Base")):
+        r = client.post("/settings/general", data={**GENERAL, key: value})
+        assert r.status_code == 400, (key, value)
+    assert 'value="http://spools.lan:7913"' in client.get("/settings").text   # nothing saved
+
+
+def test_saved_settings_beat_env_on_restart(tmp_path):
+    fake = FakeBackends()
+    with TestClient(create_app(settings(tmp_path), transport=httpx.MockTransport(fake.handler))) as client:
+        client.post("/settings/general", data=GENERAL)
+    restarted = create_app(settings(tmp_path, base_url="http://from-env:1", unload_location="Env rack"),
+                           transport=httpx.MockTransport(fake.handler))
+    with TestClient(restarted) as client:
+        page = client.get("/settings").text
+        assert 'value="http://tags.lan:7913"' in page and 'value="Shelf"' in page
+        assert "from-env" not in page and "Env rack" not in page
