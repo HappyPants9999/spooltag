@@ -41,11 +41,29 @@ table{border-collapse:collapse;width:100%;font-size:.9rem}td{padding:4px 6px;bor
 """
 
 
+# The only script, served from /static/app.js (the CSP allows no inline script). Confirm dialogs
+# read their text from data-confirm, so names are never placed inside JavaScript source.
+APP_JS = """
+function copyText(t){if(navigator.clipboard&&window.isSecureContext)return navigator.clipboard.writeText(t);
+const a=document.createElement('textarea');a.value=t;a.setAttribute('readonly','');a.style.position='fixed';
+a.style.opacity='0';document.body.appendChild(a);a.select();a.setSelectionRange(0,t.length);
+const ok=document.execCommand('copy');a.remove();return ok?Promise.resolve():Promise.reject()}
+document.addEventListener('submit',e=>{const m=e.target.dataset&&e.target.dataset.confirm;
+if(m&&!window.confirm(m))e.preventDefault()});
+document.querySelectorAll('button.copy').forEach(b=>b.addEventListener('click',()=>{
+copyText(b.dataset.url).then(()=>{b.textContent='Copied \u2713';setTimeout(()=>b.textContent='Copy URL',1500)},
+()=>{b.textContent='Long-press the URL to copy'})}));
+const q=document.getElementById('q');if(q)q.addEventListener('input',e=>{const v=e.target.value.toLowerCase();
+document.querySelectorAll('[data-q]').forEach(c=>c.style.display=c.dataset.q.includes(v)?'':'none')});
+"""
+
+
 def page(title: str, body: str, refresh: Optional[int] = None) -> str:
     meta = f'<meta http-equiv="refresh" content="{refresh}">' if refresh else ""
     return (f'<!doctype html><html lang="en"><head><meta charset="utf-8">'
             f'<meta name="viewport" content="width=device-width,initial-scale=1">{meta}'
-            f'<title>{escape(title)}</title><style>{CSS}</style></head><body><main>'
+            f'<title>{escape(title)}</title><style>{CSS}</style>'
+            f'<script src="/static/app.js" defer></script></head><body><main>'
             f'<nav><a href="/">Status</a><a href="/tags">Tags</a><a href="/settings">Settings</a></nav>'
             f'{body}</main></body></html>')
 
@@ -217,21 +235,12 @@ def tags(base: str, printers: list[Printer], locations: list[Location], spools: 
                   (spool_label(s) + " " + str(s["id"]) + " " + (s.get("location") or "")).lower())
         for s in sorted(spools, key=lambda s: s["id"]))
     err = f'<div class="card bad">{escape(error)}</div>' if error else ""
-    script = ("<script>document.getElementById('q').addEventListener('input',e=>{const v=e.target.value.toLowerCase();"
-              "document.querySelectorAll('[data-q]').forEach(c=>c.style.display=c.dataset.q.includes(v)?'':'none')});"
-              # navigator.clipboard needs HTTPS; on plain-http LAN pages fall back to execCommand.
-              "function copyText(t){if(navigator.clipboard&&window.isSecureContext)return navigator.clipboard.writeText(t);"
-              "const a=document.createElement('textarea');a.value=t;a.setAttribute('readonly','');a.style.position='fixed';"
-              "a.style.opacity='0';document.body.appendChild(a);a.select();a.setSelectionRange(0,t.length);"
-              "const ok=document.execCommand('copy');a.remove();return ok?Promise.resolve():Promise.reject()}"
-              "document.querySelectorAll('button.copy').forEach(b=>b.addEventListener('click',()=>{"
-              "copyText(b.dataset.url).then(()=>{b.textContent='Copied ✓';setTimeout(()=>b.textContent='Copy URL',1500)},"
-              "()=>{b.textContent='Long-press the URL to copy'})}))</script>")
-    parts.append(f'<h2>Spools</h2>{err}<input id="q" placeholder="Filter spools…">{spool_cards}{script}')
+    parts.append(f'<h2>Spools</h2>{err}<input id="q" placeholder="Filter spools…">{spool_cards}')
     return page("Tags", "".join(parts))
 
 
 def general_form(s: Settings) -> str:
+    chk = " checked" if s.allow_public_urls else ""
     return (f'<div class="card"><form method="post" action="/settings/general">'
             f'<label>Spoolman URL</label><input name="spoolman_url" required value="{escape(s.spoolman_url)}"'
             f' placeholder="http://10.10.2.176:7912">'
@@ -247,13 +256,43 @@ def general_form(s: Settings) -> str:
             f' min="10" max="3600" required value="{s.pending_timeout}"></div>'
             f'<div><label>Time zone for the scan log (empty = server time)</label>'
             f'<input name="timezone" value="{escape(s.timezone)}" placeholder="America/Denver"></div></div>'
+            f'<label>Other host names this page is opened by (IP addresses and the tag base URL\'s host'
+            f' always work)</label>'
+            f'<input name="extra_hosts" value="{escape(s.extra_hosts)}" placeholder="spooltag.lan">'
+            f'<label class="check"><input type="checkbox" name="allow_public_urls"{chk}>'
+            f'Allow service URLs on public internet addresses (normally off: Spoolman, Moonraker and '
+            f'Bambuddy are on your network)</label>'
             f'<p class="dim" style="margin:.5em 0 0">A new location format applies to the next scan; '
             f'spools already loaded keep their old location text until they are scanned again.</p>'
             f'<div style="margin-top:10px"><button class="primary">Save</button></div></form></div>')
 
 
+def admin_section(has_password: bool) -> str:
+    pw = ('<label>New password (8+ characters)</label><input name="new" type="password" required minlength="8"'
+          ' autocomplete="new-password"><label>New password again</label>'
+          '<input name="confirm" type="password" required minlength="8" autocomplete="new-password">')
+    if not has_password:
+        return ('<h2>Admin password</h2><div class="card"><p class="bad" style="margin-top:0">No admin password: '
+                'anyone on your network can change these settings. Tag scanning never needs a password.</p>'
+                f'<form method="post" action="/settings/password"><input type="hidden" name="action" value="set">'
+                f'{pw}<div style="margin-top:10px"><button class="primary">Set password</button></div></form></div>')
+    current = ('<label>Current password</label><input name="current" type="password" required'
+               ' autocomplete="current-password">')
+    return ('<h2>Admin password</h2><div class="card"><p class="dim" style="margin-top:0">Settings and the '
+            'Clear buttons need the password. Tag scanning doesn\'t.</p>'
+            '<form method="post" action="/logout"><button>Log out</button></form>'
+            '<details><summary>Change password</summary><form method="post" action="/settings/password">'
+            f'<input type="hidden" name="action" value="set">{current}{pw}'
+            '<div style="margin-top:10px"><button class="primary">Change password</button></div></form></details>'
+            '<details><summary>Remove password</summary><form method="post" action="/settings/password" '
+            'data-confirm="Remove the admin password? Anyone on your network will be able to change settings.">'
+            f'<input type="hidden" name="action" value="remove">{current}'
+            '<div style="margin-top:10px"><button class="danger">Remove password</button></div></form></details>'
+            '</div>')
+
+
 def settings(general: Settings, printers: list[Printer], locations: list[Location], notice: str = "",
-             error: str = "") -> str:
+             error: str = "", has_password: bool = False) -> str:
     msg = (f'<div class="card bad">{escape(error)}</div>' if error else
            f'<div class="card ok">{escape(notice)}</div>' if notice else "")
 
@@ -266,6 +305,10 @@ def settings(general: Settings, printers: list[Printer], locations: list[Locatio
                       '<input type="hidden" name="mode" value="edit">')
         chk = lambda on: " checked" if on else ""  # noqa: E731
         sel = lambda k: " selected" if p.kind == k else ""  # noqa: E731
+        # The key is never sent back to the browser: blank keeps the stored one.
+        key_note = "a key is saved; leave blank to keep it" if p.api_key else "none saved"
+        clear_key = ('<label class="check"><input type="checkbox" name="clear_api_key">Remove the saved key</label>'
+                     if p.api_key else "")
         return (f'<form method="post" action="/settings/printers">'
                 f'<label>Type</label><select name="kind">'
                 f'<option value="{KLIPPER}"{sel(KLIPPER)}>Klipper printer (Moonraker)</option>'
@@ -277,7 +320,8 @@ def settings(general: Settings, printers: list[Printer], locations: list[Locatio
                 f' value="{escape(p.moonraker_url)}" placeholder="http://10.10.2.50:7125">'
                 f'<label>API key (Moonraker: only if this server isn\'t a trusted client; '
                 f'Bambuddy: a key with Read status + Manage inventory)</label>'
-                f'<input name="api_key" value="{escape(p.api_key)}">'
+                f'<input name="api_key" type="password" autocomplete="off" value="" placeholder="{key_note}">'
+                f'{clear_key}'
                 f'<label>Printer id in Bambuddy (AMS only)</label><input name="remote_id" inputmode="numeric"'
                 f' value="{p.remote_id or ""}" placeholder="1">{slug_field}'
                 f'<label class="check"><input type="checkbox" name="save_variables"{chk(p.save_variables)}>'
@@ -292,14 +336,14 @@ def settings(general: Settings, printers: list[Printer], locations: list[Locatio
         f'{p.num_tools} {"AMS slot" if p.is_ams else "tool"}{"" if p.num_tools == 1 else "s"}'
         f'{" via Bambuddy" if p.is_ams else ""} · tags /t/{escape(p.slug)}/&lt;n&gt;</span></div>'
         f'<form method="post" action="/settings/printers/{escape(p.slug)}/delete" '
-        f'onsubmit="return confirm(\'Remove {escape(p.name)}? Its tool tags stop working.\')">'
+        f'data-confirm="{escape("Remove " + p.name + "? Its tool tags stop working.")}">'
         f'<button class="danger">Remove</button></form></div>'
         f'<details><summary>Edit</summary>{printer_form(p)}</details></div>'
         for p in printers)
     llist = "".join(
         f'<li class="row"><span>{escape(l.name)} <span class="dim">/l/{escape(l.slug)}</span></span>'
         f'<form method="post" action="/settings/locations/{escape(l.slug)}/delete" '
-        f'onsubmit="return confirm(\'Remove {escape(l.name)}? Its tag stops working.\')">'
+        f'data-confirm="{escape("Remove " + l.name + "? Its tag stops working.")}">'
         f'<button class="danger">Remove</button></form></li>'
         for l in locations)
     return page("Settings", f'<h1>Settings</h1>{msg}'
@@ -309,9 +353,32 @@ def settings(general: Settings, printers: list[Printer], locations: list[Locatio
                 f'<p class="dim">The name is written to Spoolman as the spool\'s location, exactly as typed.</p>'
                 f'{"<div class=card><ul class=plain>" + llist + "</ul></div>" if llist else ""}'
                 f'<div class="card"><h3>Add a location</h3><form method="post" action="/settings/locations">'
-                f'<label>Name</label><input name="name" required placeholder="Dry box 1">'
+                f'<label>Name</label><input name="name" required maxlength="100" placeholder="Dry box 1">'
                 f'<label>Short id for the tag URL (optional)</label>'
                 f'<input name="slug" placeholder="made from the name, e.g. dry-box-1" pattern="[a-z0-9][a-z0-9-]*">'
                 f'<div style="margin-top:10px"><button class="primary">Add location</button></div></form></div>'
                 f'<p class="dim">Short ids are fixed once created because they\'re written onto tags. '
-                f'To change one, remove it, add it again and rewrite the tag.</p>')
+                f'To change one, remove it, add it again and rewrite the tag.</p>'
+                f'{admin_section(has_password)}')
+
+
+def confirm_scan(what: str, action: str) -> str:
+    """Shown instead of acting when a scan URL was opened by another website, not by a tag."""
+    return page("Confirm scan", f'<h1>Confirm this scan?</h1><div class="card">'
+                f'<p style="margin-top:0">This link was opened from another website or app page, not by tapping '
+                f'a tag, so nothing has been changed yet.</p><div class="big">{escape(what)}</div>'
+                f'<form method="post" action="{escape(action)}" style="margin-top:10px">'
+                f'<button class="primary">Yes, scan it</button></form>'
+                f'<p class="dim">If you didn\'t mean to scan anything, just close this page.</p></div>')
+
+
+def login(next_path: str, error: str = "") -> str:
+    err = f'<div class="card bad">{escape(error)}</div>' if error else ""
+    return page("Log in", f'<h1>Admin login</h1>{err}<div class="card">'
+                f'<form method="post" action="/login"><input type="hidden" name="next" value="{escape(next_path)}">'
+                f'<label>Password</label><input name="password" type="password" required autofocus'
+                f' autocomplete="current-password"><div style="margin-top:10px">'
+                f'<button class="primary">Log in</button></div></form>'
+                f'<p class="dim">Tag scanning works without logging in. Forgot the password? Run '
+                f'<code>docker exec spooltag python -m app.admin reset-password</code> on the Docker host.</p>'
+                f'</div>')
