@@ -1,11 +1,15 @@
-"""App-wide settings from environment variables.
+"""App-wide settings.
 
-Printers and storage locations live in the database and are edited on the /settings page. The
-old single-printer variables (MOONRAKER_URL, NUM_TOOLS, PRINTER_NAME, ...) are still read once:
-on first start with an empty printer list they become the first printer.
+Everything is edited on the /settings page and stored in the database. Environment variables are
+only starting values: on first start each general setting missing from the database is seeded
+from its variable (SPOOLMAN_URL, BASE_URL, ...), and the old single-printer variables
+(MOONRAKER_URL, NUM_TOOLS, PRINTER_NAME, ...) become the first printer if there are none.
+After that the database wins and the variables can be removed from the compose file.
+Only DATA_DIR, which says where the database is, has to stay an environment variable.
 """
 import os
 from dataclasses import dataclass
+from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
 
 def _bool(name: str, default: bool = False) -> bool:
@@ -20,6 +24,14 @@ def _int(name: str, default: int) -> int:
     return int(value) if value else default
 
 
+def valid_timezone(name: str) -> bool:
+    try:
+        ZoneInfo(name)
+        return True
+    except (ZoneInfoNotFoundError, ValueError):
+        return False
+
+
 @dataclass(frozen=True)
 class LegacyPrinter:
     """The pre-0.2 single printer from env vars, used only to seed an empty printer list."""
@@ -31,8 +43,13 @@ class LegacyPrinter:
     macro_variable: bool
 
 
-@dataclass(frozen=True)
+# General settings kept in the database, in the order the Settings page shows them.
+GENERAL = ("spoolman_url", "base_url", "location_format", "unload_location", "pending_timeout", "timezone")
+
+
+@dataclass
 class Settings:
+    """One shared instance; the Settings page updates it in place, so changes apply at once."""
     spoolman_url: str
     base_url: str
     location_format: str
@@ -40,9 +57,28 @@ class Settings:
     pending_timeout: int
     data_dir: str
     legacy_printer: LegacyPrinter | None = None
+    timezone: str = ""      # IANA name, e.g. America/Denver; empty = the container's local time
 
     def location_for(self, printer_name: str, tool: int) -> str:
         return self.location_format.format(printer=printer_name, tool=tool)
+
+    def general(self) -> dict[str, str]:
+        return {k: str(getattr(self, k)) for k in GENERAL}
+
+    def apply(self, values: dict[str, str]) -> None:
+        """Set general settings from stored strings (unknown keys are ignored)."""
+        for key, value in values.items():
+            if key not in GENERAL:
+                continue
+            if key == "pending_timeout":
+                try:
+                    self.pending_timeout = int(value)
+                except ValueError:
+                    continue
+            elif key.endswith("_url"):
+                setattr(self, key, value.strip().rstrip("/"))
+            else:
+                setattr(self, key, value)
 
 
 def load_settings() -> Settings:
@@ -66,4 +102,5 @@ def load_settings() -> Settings:
         pending_timeout=_int("PENDING_TIMEOUT", 120),
         data_dir=os.environ.get("DATA_DIR", "/data"),
         legacy_printer=legacy,
+        timezone=os.environ.get("TZ", "").strip(),
     )

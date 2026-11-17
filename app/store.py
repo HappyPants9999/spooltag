@@ -1,4 +1,4 @@
-"""SQLite store: printers, storage locations, the one pending scan, and a log."""
+"""SQLite store: general settings, printers, storage locations, the one pending scan, and a log."""
 import os
 import re
 import sqlite3
@@ -89,11 +89,23 @@ class Store:
                 db.execute(f"ALTER TABLE printers ADD COLUMN kind TEXT NOT NULL DEFAULT '{KLIPPER}'")
             if "remote_id" not in pcols:
                 db.execute("ALTER TABLE printers ADD COLUMN remote_id INTEGER NOT NULL DEFAULT 0")
+            db.execute("CREATE TABLE IF NOT EXISTS settings (key TEXT PRIMARY KEY, value TEXT NOT NULL)")
             db.execute("CREATE TABLE IF NOT EXISTS locations (slug TEXT PRIMARY KEY, name TEXT NOT NULL UNIQUE,"
                        " position INTEGER NOT NULL DEFAULT 0)")
 
     def _conn(self) -> sqlite3.Connection:
         return sqlite3.connect(self.path)
+
+    # General settings ----------------------------------------------------------------------
+
+    def settings(self) -> dict[str, str]:
+        with self._conn() as db:
+            return dict(db.execute("SELECT key, value FROM settings").fetchall())
+
+    def save_settings(self, values: dict[str, str], only_missing: bool = False) -> None:
+        verb = "INSERT OR IGNORE" if only_missing else "INSERT OR REPLACE"
+        with self._conn() as db:
+            db.executemany(f"{verb} INTO settings (key, value) VALUES (?, ?)", list(values.items()))
 
     # Printers ------------------------------------------------------------------------------
 

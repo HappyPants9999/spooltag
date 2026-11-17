@@ -6,13 +6,13 @@ Tag routes (opened by tapping an NFC tag)
                                   or AMS slot tag      e.g. /t/p1s/1 .. /t/p1s/4 (via Bambuddy)
   GET  /t/{tool}                  tool of the first printer (0.1 tags)
   GET  /l/{location}              storage tag          e.g. /l/dry-box-1
-A spool scan pairs with a tool or storage scan, in either order, within PENDING_TIMEOUT seconds.
+A spool scan pairs with a tool or storage scan, in either order, within the scan timeout set in Settings.
 
 Pages
   GET  /                          every printer's tools, storage, recent scans
   GET  /locations/{location}      what's stored in a location
   GET  /tags                      tag URLs + QR codes
-  GET  /settings                  add/edit/remove printers and storage locations
+  GET  /settings                  general settings; add/edit/remove printers and storage locations
 """
 from contextlib import asynccontextmanager
 from typing import Optional
@@ -24,7 +24,7 @@ from fastapi.responses import HTMLResponse, PlainTextResponse, RedirectResponse
 
 from . import pages
 from .clients import Spoolman
-from .config import Settings, load_settings
+from .config import Settings, load_settings, valid_timezone
 from .service import Service
 from .store import BAMBUDDY, KLIPPER, SLUG_RE, Location, Printer, Store, slugify
 
@@ -37,6 +37,9 @@ def create_app(settings: Optional[Settings] = None,
     async def lifespan(app: FastAPI):
         client = httpx.AsyncClient(timeout=8.0, transport=transport)
         store = Store(settings.data_dir)
+        # Env vars (or the passed-in settings) only seed what the database doesn't have yet.
+        store.save_settings(settings.general(), only_missing=True)
+        settings.apply(store.settings())
         legacy = settings.legacy_printer
         if legacy and not store.printers():
             store.save_printer(Printer(slugify(legacy.name) or "printer", legacy.name, legacy.moonraker_url,
@@ -171,7 +174,7 @@ def create_app(settings: Optional[Settings] = None,
             except httpx.HTTPError:
                 counts = {l.name: -1 for l in locations}
         return pages.status(grids, [(l, counts.get(l.name, 0)) for l in locations],
-                            pending_text(service), service.store.recent())
+                            pending_text(service), service.store.recent(), settings.timezone)
 
     @app.get("/locations/{slug}", response_class=HTMLResponse)
     async def view_location(slug: str, request: Request):
@@ -215,7 +218,7 @@ def create_app(settings: Optional[Settings] = None,
 
     def settings_page(request: Request, notice: str = "", error: str = "", code: int = 200) -> HTMLResponse:
         store = svc(request).store
-        return HTMLResponse(pages.settings(store.printers(), store.locations(), notice, error), code)
+        return HTMLResponse(pages.settings(settings, store.printers(), store.locations(), notice, error), code)
 
     @app.get("/settings", response_class=HTMLResponse)
     async def settings_view(request: Request, saved: str = ""):
@@ -223,6 +226,36 @@ def create_app(settings: Optional[Settings] = None,
 
     def saved(text: str) -> RedirectResponse:
         return RedirectResponse("/settings?" + urlencode({"saved": text}), status_code=303)
+
+    @app.post("/settings/general")
+    async def save_general(request: Request, spoolman_url: str = Form(...), base_url: str = Form(""),
+                           location_format: str = Form(...), unload_location: str = Form(""),
+                           pending_timeout: str = Form(...), timezone: str = Form("")):
+        spoolman_url, base_url = spoolman_url.strip().rstrip("/"), base_url.strip().rstrip("/")
+        location_format, timezone = location_format.strip(), timezone.strip()
+        if not spoolman_url.startswith(("http://", "https://")):
+            return settings_page(request, error="The Spoolman URL must start with http:// or https://", code=400)
+        if base_url and not base_url.startswith(("http://", "https://")):
+            return settings_page(request, error="The tag base URL must start with http:// or https://", code=400)
+        try:
+            sample = location_format.format(printer="SV08", tool=3)
+        except (KeyError, IndexError, ValueError):
+            sample = ""
+        if not sample.strip():
+            return settings_page(request, error="The tool location format may only use {printer} and {tool}, "
+                                                "e.g. {printer} T{tool}.", code=400)
+        if not pending_timeout.strip().isdigit() or not 10 <= int(pending_timeout) <= 3600:
+            return settings_page(request, error="The scan timeout must be 10 to 3600 seconds.", code=400)
+        if timezone and not valid_timezone(timezone):
+            return settings_page(request, error=f"'{timezone}' isn't a time zone name "
+                                                f"(use one like America/Denver).", code=400)
+        values = {"spoolman_url": spoolman_url, "base_url": base_url, "location_format": location_format,
+                  "unload_location": unload_location.strip(), "pending_timeout": str(int(pending_timeout)),
+                  "timezone": timezone}
+        svc(request).store.save_settings(values)
+        settings.apply(values)
+        svc(request).spoolman.base = settings.spoolman_url
+        return saved("General settings saved.")
 
     @app.post("/settings/printers")
     async def save_printer(request: Request, name: str = Form(...), num_tools: int = Form(...),

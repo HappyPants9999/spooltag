@@ -1,11 +1,13 @@
 """Server-rendered HTML for phones. No JS framework, no external assets."""
-import time
+from datetime import datetime
 from html import escape
 from typing import Optional
+from zoneinfo import ZoneInfo
 
 import segno
 
 from .clients import spool_label
+from .config import Settings, valid_timezone
 from .store import BAMBUDDY, KLIPPER, Location, Printer
 
 CSS = """
@@ -151,7 +153,13 @@ def printer_grid(printer: Printer, lanes: dict[int, dict], error: Optional[str])
     return f'<h2>{escape(printer.name)}{via}</h2>{err}<div class="tools">{"".join(cards)}</div>'
 
 
-def status(grids: list[str], locations: list[tuple[Location, int]], pending_text: str, recent) -> str:
+def clock(ts: float, tz: str = "") -> str:
+    when = datetime.fromtimestamp(ts, ZoneInfo(tz)) if tz and valid_timezone(tz) else datetime.fromtimestamp(ts)
+    return when.strftime("%m-%d %H:%M")
+
+
+def status(grids: list[str], locations: list[tuple[Location, int]], pending_text: str, recent,
+           tz: str = "") -> str:
     pend = ""
     if pending_text:
         pend = (f'<div class="card">Waiting for a second scan after {escape(pending_text)}. '
@@ -166,7 +174,7 @@ def status(grids: list[str], locations: list[tuple[Location, int]], pending_text
                         for l, n in locations)
         locs = f'<h2>Storage</h2><div class="card"><ul class="plain">{items}</ul></div>'
     rows = "".join(
-        f'<tr><td class="dim">{time.strftime("%m-%d %H:%M", time.localtime(ts))}</td>'
+        f'<tr><td class="dim">{clock(ts, tz)}</td>'
         f'<td>{escape(action)}</td><td>{escape(target or "")}</td>'
         f'<td>{"#" + str(sid) if sid else ""} {escape(detail or "")}</td></tr>'
         for ts, sid, target, action, detail in recent)
@@ -223,7 +231,29 @@ def tags(base: str, printers: list[Printer], locations: list[Location], spools: 
     return page("Tags", "".join(parts))
 
 
-def settings(printers: list[Printer], locations: list[Location], notice: str = "", error: str = "") -> str:
+def general_form(s: Settings) -> str:
+    return (f'<div class="card"><form method="post" action="/settings/general">'
+            f'<label>Spoolman URL</label><input name="spoolman_url" required value="{escape(s.spoolman_url)}"'
+            f' placeholder="http://10.10.2.176:7912">'
+            f'<label>Tag base URL — written onto every tag, so changing it breaks the tags already written'
+            f' (empty = this page\'s address)</label>'
+            f'<input name="base_url" value="{escape(s.base_url)}" placeholder="http://10.10.2.176:7913">'
+            f'<div class="grid2"><div><label>Spoolman location for a tool ({{printer}}, {{tool}})</label>'
+            f'<input name="location_format" required value="{escape(s.location_format)}"'
+            f' placeholder="{{printer}} T{{tool}}"></div>'
+            f'<div><label>Location for a replaced or cleared spool (empty = leave it)</label>'
+            f'<input name="unload_location" value="{escape(s.unload_location)}" placeholder="Dry rack"></div>'
+            f'<div><label>Seconds to wait for the second scan</label><input name="pending_timeout" type="number"'
+            f' min="10" max="3600" required value="{s.pending_timeout}"></div>'
+            f'<div><label>Time zone for the scan log (empty = server time)</label>'
+            f'<input name="timezone" value="{escape(s.timezone)}" placeholder="America/Denver"></div></div>'
+            f'<p class="dim" style="margin:.5em 0 0">A new location format applies to the next scan; '
+            f'spools already loaded keep their old location text until they are scanned again.</p>'
+            f'<div style="margin-top:10px"><button class="primary">Save</button></div></form></div>')
+
+
+def settings(general: Settings, printers: list[Printer], locations: list[Location], notice: str = "",
+             error: str = "") -> str:
     msg = (f'<div class="card bad">{escape(error)}</div>' if error else
            f'<div class="card ok">{escape(notice)}</div>' if notice else "")
 
@@ -273,6 +303,7 @@ def settings(printers: list[Printer], locations: list[Location], notice: str = "
         f'<button class="danger">Remove</button></form></li>'
         for l in locations)
     return page("Settings", f'<h1>Settings</h1>{msg}'
+                f'<h2>General</h2>{general_form(general)}'
                 f'<h2>Printers</h2>{plist}<div class="card"><h3>Add a printer</h3>{printer_form(None)}</div>'
                 f'<h2>Storage locations</h2>'
                 f'<p class="dim">The name is written to Spoolman as the spool\'s location, exactly as typed.</p>'
