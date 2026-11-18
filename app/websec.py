@@ -20,7 +20,7 @@ from fastapi import Request
 UNSAFE_METHODS = {"POST", "PUT", "PATCH", "DELETE"}
 
 CSP = ("default-src 'none'; script-src 'self'; style-src 'unsafe-inline'; img-src 'self' data:; "
-       "form-action 'self'; frame-ancestors 'none'; base-uri 'none'")
+       "manifest-src 'self'; form-action 'self'; frame-ancestors 'none'; base-uri 'none'")
 SECURITY_HEADERS = {
     "Content-Security-Policy": CSP,
     "X-Frame-Options": "DENY",

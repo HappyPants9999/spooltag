@@ -58,11 +58,19 @@ document.querySelectorAll('[data-q]').forEach(c=>c.style.display=c.dataset.q.inc
 """
 
 
+# Favicon and web-app icons (files in app/static/, served from the site root by main.py).
+ICON_LINKS = ('<link rel="icon" type="image/png" href="/favicon-96x96.png" sizes="96x96">'
+              '<link rel="icon" type="image/svg+xml" href="/favicon.svg">'
+              '<link rel="shortcut icon" href="/favicon.ico">'
+              '<link rel="apple-touch-icon" sizes="180x180" href="/apple-touch-icon.png">'
+              '<link rel="manifest" href="/site.webmanifest">')
+
+
 def page(title: str, body: str, refresh: Optional[int] = None) -> str:
     meta = f'<meta http-equiv="refresh" content="{refresh}">' if refresh else ""
     return (f'<!doctype html><html lang="en"><head><meta charset="utf-8">'
             f'<meta name="viewport" content="width=device-width,initial-scale=1">{meta}'
-            f'<title>{escape(title)}</title><style>{CSS}</style>'
+            f'<title>{escape(title)}</title>{ICON_LINKS}<style>{CSS}</style>'
             f'<script src="/static/app.js" defer></script></head><body><main>'
             f'<nav><a href="/">Status</a><a href="/tags">Tags</a><a href="/settings">Settings</a></nav>'
             f'{body}</main></body></html>')

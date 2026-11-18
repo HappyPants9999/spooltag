@@ -72,6 +72,19 @@ jobs:
           test "$(code -X POST -H 'Origin: https://evil.example' -d 'name=x' http://127.0.0.1:7913/settings/locations)" = 403
           test "$(code -H 'Host: rebind.evil.example' http://127.0.0.1:7913/settings)" = 400
           curl -sI http://127.0.0.1:7913/ | grep -qi "frame-ancestors 'none'"
+      - name: Check bundled icons
+        run: |
+          set -x
+          ctype() { curl -fs -o /dev/null -w '%{content_type}' "http://127.0.0.1:7913/$1"; }
+          test "$(ctype favicon.svg)" = image/svg+xml
+          test "$(ctype favicon-96x96.png)" = image/png
+          test "$(ctype favicon.ico)" = image/x-icon
+          test "$(ctype apple-touch-icon.png)" = image/png
+          test "$(ctype web-app-manifest-192x192.png)" = image/png
+          test "$(ctype web-app-manifest-512x512.png)" = image/png
+          test "$(ctype site.webmanifest)" = application/manifest+json
+          curl -fs http://127.0.0.1:7913/site.webmanifest | grep -q '"name": "Spooltag"'
+          curl -fs http://127.0.0.1:7913/ | grep -q '<link rel="manifest" href="/site.webmanifest">'
       - name: Logs
         if: always()
         run: docker logs st || true

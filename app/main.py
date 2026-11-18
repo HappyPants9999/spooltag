@@ -42,6 +42,28 @@ from .websec import (DEVICE_COOKIE, SECURITY_HEADERS, UNSAFE_METHODS, device_id,
                      host_allowed, host_only, is_https, is_ip, is_top_level_navigation, scan_is_direct,
                      unsafe_request_allowed)
 
+# Favicon / web-app icon files bundled in app/static/ and served from the site root. A fixed list,
+# read once at start-up: no directory listing, no paths from the request.
+STATIC_DIR = os.path.join(os.path.dirname(__file__), "static")
+ICON_FILES = {
+    "favicon.svg": "image/svg+xml",
+    "favicon-96x96.png": "image/png",
+    "favicon.ico": "image/x-icon",
+    "apple-touch-icon.png": "image/png",
+    "web-app-manifest-192x192.png": "image/png",
+    "web-app-manifest-512x512.png": "image/png",
+    "site.webmanifest": "application/manifest+json",
+}
+
+
+def load_icons() -> dict[str, bytes]:
+    files = {}
+    for name in ICON_FILES:
+        with open(os.path.join(STATIC_DIR, name), "rb") as f:
+            files[name] = f.read()
+    return files
+
+
 TOOL_RE = re.compile(r"^[0-9]{1,3}$")
 HOSTNAME_RE = re.compile(r"^(?=.{1,253}$)[a-z0-9_]([a-z0-9_-]{0,61}[a-z0-9_])?(\.[a-z0-9_]([a-z0-9_-]{0,61}[a-z0-9_])?)*$")
 MAX_SPOOL_ID = 2_147_483_647
@@ -272,6 +294,17 @@ def create_app(settings: Optional[Settings] = None,
         return await _location_route(request, slug, confirmed=True)
 
     # Pages -------------------------------------------------------------------------------
+
+    icons = load_icons()
+
+    def icon_route(name: str, media_type: str):
+        async def serve_icon():
+            return Response(icons[name], media_type=media_type, headers={"Cache-Control": "public, max-age=86400"})
+        return serve_icon
+
+    for icon_name, icon_type in ICON_FILES.items():   # no login needed, like the login page itself
+        app.add_api_route(f"/{icon_name}", icon_route(icon_name, icon_type), methods=["GET"],
+                          include_in_schema=False)
 
     @app.get("/static/app.js")
     async def app_js():
