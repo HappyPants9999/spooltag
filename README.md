@@ -146,7 +146,7 @@ spooltag is built for a home network you trust. It is **not** meant to be expose
 - **Outgoing requests** (Spoolman, Moonraker, Bambuddy) may only go to local-network addresses. The address is checked after DNS lookup and the connection is pinned to it. Link-local and cloud-metadata addresses are always refused, and proxy environment variables are ignored.
 - **Headers:** a strict Content-Security-Policy (no inline script), no framing, `nosniff`, `Referrer-Policy: same-origin`, and `no-store` on pages.
 - **Container:** runs as an unprivileged user with no capabilities, can run with a read-only root filesystem and `no-new-privileges`, and keeps the database `0600` in a `0700` folder.
-- **Supply chain:** dependencies and GitHub Actions are pinned (actions by commit SHA), Dependabot proposes weekly updates, and every pull request runs the tests plus a container smoke test before anything is published.
+- **Supply chain:** dependencies and GitHub Actions are pinned (actions by commit SHA), Dependabot proposes weekly updates (the image stays on Python 3.12 and gets its patch releases), and every pull request runs the tests plus a container smoke test before anything is published.
 
 **Limitations (accepted risks)**
 

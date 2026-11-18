@@ -14,3 +14,7 @@ updates:
   - package-ecosystem: docker
     directory: /
     schedule: {interval: weekly}
+    # Stay on Python 3.12 for now: take its patch/security releases (3.12.x), not 3.13+.
+    ignore:
+      - dependency-name: python
+        update-types: ["version-update:semver-major", "version-update:semver-minor"]
