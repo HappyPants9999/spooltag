@@ -291,6 +291,29 @@ def admin_section(has_password: bool) -> str:
             '</div>')
 
 
+def backup_section() -> str:
+    return ('<h2>Backup &amp; restore</h2><div class="card">'
+            '<p class="bad" style="margin-top:0"><b>A backup contains your API keys and the admin password '
+            'hash.</b> Store it somewhere private, like a password file.</p>'
+            '<p class="dim">It holds spooltag\'s own settings, printers, storage locations and scan log - not '
+            'Spoolman, Moonraker, Bambuddy or anything on the printers.</p>'
+            '<form method="post" action="/settings/backup"><button class="primary">Download backup</button></form>'
+            '<h3>Restore</h3>'
+            '<form method="post" action="/settings/restore" enctype="multipart/form-data" '
+            'data-confirm="Replace ALL spooltag configuration with this backup? A safety copy of the current '
+            'configuration is saved first.">'
+            '<input type="file" name="backup" required accept=".db,.sqlite,.sqlite3,application/vnd.sqlite3,'
+            'application/x-sqlite3">'
+            '<label class="check"><input type="checkbox" name="confirm_replace" required>'
+            'Replace all spooltag configuration (settings, printers, locations, admin password) with the '
+            'backup</label>'
+            '<div style="margin-top:10px"><button class="danger">Restore backup</button></div></form>'
+            '<p class="dim">Before restoring, the current configuration is saved in the data folder under '
+            '<code>backups/</code> (the last 5 are kept). Everyone is logged out and pending scans are '
+            'cancelled. Printer and location ids and the tag base URL come from the backup, so tags written '
+            'for it keep working.</p></div>')
+
+
 def settings(general: Settings, printers: list[Printer], locations: list[Location], notice: str = "",
              error: str = "", has_password: bool = False) -> str:
     msg = (f'<div class="card bad">{escape(error)}</div>' if error else
@@ -359,7 +382,7 @@ def settings(general: Settings, printers: list[Printer], locations: list[Locatio
                 f'<div style="margin-top:10px"><button class="primary">Add location</button></div></form></div>'
                 f'<p class="dim">Short ids are fixed once created because they\'re written onto tags. '
                 f'To change one, remove it, add it again and rewrite the tag.</p>'
-                f'{admin_section(has_password)}')
+                f'{admin_section(has_password)}{backup_section()}')
 
 
 def confirm_scan(what: str, action: str) -> str:

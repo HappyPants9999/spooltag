@@ -19,6 +19,11 @@ def slugify(name: str) -> str:
     return slug[:32].strip("-")
 
 
+# Marks the file as a spooltag database ('SPTG') and its layout version, so a restore can tell a
+# spooltag backup from another SQLite file, and refuse one written by a newer spooltag.
+APP_ID = int.from_bytes(b"SPTG", "big")
+SCHEMA_VERSION = 1
+
 KLIPPER = "moonraker"
 BAMBUDDY = "bambuddy"
 
@@ -116,6 +121,8 @@ class Store:
             db.execute("CREATE TABLE IF NOT EXISTS settings (key TEXT PRIMARY KEY, value TEXT NOT NULL)")
             db.execute("CREATE TABLE IF NOT EXISTS locations (slug TEXT PRIMARY KEY, name TEXT NOT NULL UNIQUE,"
                        " position INTEGER NOT NULL DEFAULT 0)")
+            db.execute("PRAGMA application_id = 1397773383")       # APP_ID
+            db.execute("PRAGMA user_version = 1")                  # SCHEMA_VERSION
 
     def _conn(self) -> sqlite3.Connection:
         return sqlite3.connect(self.path)
@@ -250,6 +257,10 @@ class Store:
                 return None
             db.execute("DELETE FROM scan_pending WHERE device = ?", (device,))
         return Pending(*row)
+
+    def clear_all_pending(self) -> None:
+        with self._write_txn() as db:
+            db.execute("DELETE FROM scan_pending")
 
     def clear_pending(self, device: str) -> None:
         with self._write_txn() as db:

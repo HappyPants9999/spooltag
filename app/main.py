@@ -17,7 +17,9 @@ Pages
   GET  /settings                  general settings, printers, storage, admin password (admin)
   GET  /login                     only when an admin password is set
 """
+import os
 import re
+import secrets
 from contextlib import asynccontextmanager
 from typing import Optional
 from urllib.parse import urlencode
@@ -26,8 +28,9 @@ import httpx
 from fastapi import Depends, FastAPI, Form, Path, Request
 from fastapi.concurrency import run_in_threadpool
 from fastapi.responses import HTMLResponse, PlainTextResponse, RedirectResponse, Response
+from starlette.datastructures import UploadFile
 
-from . import pages
+from . import backup, pages
 from .auth import (HASH_KEY, MIN_LENGTH, SESSION_COOKIE, SESSION_DAYS, LoginLimiter, hash_password, is_admin,
                    new_session, password_set, safe_next, token_hash, verify_password)
 from .clients import Spoolman
@@ -390,7 +393,7 @@ def create_app(settings: Optional[Settings] = None,
 
     @app.get("/settings", response_class=HTMLResponse, dependencies=admin)
     async def settings_view(request: Request, saved: str = ""):
-        return settings_page(request, notice=saved[:200])
+        return settings_page(request, notice=saved[:500])
 
     def saved(text: str) -> RedirectResponse:
         return RedirectResponse("/settings?" + urlencode({"saved": text}), status_code=303)
@@ -529,6 +532,70 @@ def create_app(settings: Optional[Settings] = None,
         store.save_settings({HASH_KEY: await run_in_threadpool(hash_password, new)})
         store.delete_all_sessions()            # sign out every other browser
         return with_session(saved("Admin password saved."), request, new_session(store))
+
+    # Backup & restore ----------------------------------------------------------------------
+
+    @app.post("/settings/backup", dependencies=admin)
+    async def download_backup(request: Request):
+        data = await run_in_threadpool(backup.snapshot, svc(request).store.path)
+        return Response(data, media_type="application/vnd.sqlite3", headers={
+            "Content-Disposition": f'attachment; filename="{backup.filename(settings.timezone)}"',
+            "Cache-Control": "no-store"})
+
+    @app.post("/settings/restore", dependencies=admin)
+    async def restore_backup(request: Request):
+        length = request.headers.get("content-length", "")
+        if not re.fullmatch(r"[0-9]{1,12}", length):
+            return settings_page(request, error="The upload had no size; try another browser.", code=411)
+        if int(length) > backup.MAX_BACKUP_BYTES + 64 * 1024:
+            return settings_page(request, error="That file is too large to be a spooltag backup (10 MB max).",
+                                 code=413)
+        form = await request.form(max_files=1, max_fields=4, max_part_size=64 * 1024)
+        upload_path = ""
+        try:
+            upload = form.get("backup")
+            if not isinstance(upload, UploadFile) or not upload.filename:
+                return settings_page(request, error="Choose a backup file to restore.", code=400)
+            if form.get("confirm_replace") != "on":
+                return settings_page(request, error="Tick the box to confirm that all spooltag configuration "
+                                                    "will be replaced.", code=400)
+            store = svc(request).store
+            upload_path = os.path.join(settings.data_dir, f".upload-{secrets.token_hex(8)}.db")
+            size = 0
+            old_umask = os.umask(0o077)
+            try:
+                with open(upload_path, "wb") as out:
+                    while chunk := await upload.read(256 * 1024):
+                        size += len(chunk)
+                        if size > backup.MAX_BACKUP_BYTES:
+                            return settings_page(request, error="That file is too large to be a spooltag "
+                                                                "backup (10 MB max).", code=413)
+                        out.write(chunk)
+            finally:
+                os.umask(old_umask)
+            try:
+                counts, safety = await run_in_threadpool(backup.restore, store, upload_path)
+            except backup.BackupError as e:
+                return settings_page(request, error=str(e), code=400)
+            settings.apply(store.settings())
+            store.save_settings(settings.general(), only_missing=True)   # an older backup may lack some
+            if settings.admin_password_seed and not password_set(store):
+                store.save_settings({HASH_KEY: hash_password(settings.admin_password_seed)})
+            store.clear_all_pending()
+            store.delete_all_sessions()
+            svc(request).spoolman.base = settings.spoolman_url
+            note = (f"Backup restored: {counts['printers']} printer(s), {counts['locations']} location(s). "
+                    f"The previous configuration was saved as backups/{os.path.basename(safety)}.")
+            if not host_allowed(request.headers.get("host", ""), settings.allowed_hosts()):
+                note += " This host name isn't in the restored settings; open spooltag by IP address."
+            target = "/settings?" + urlencode({"saved": note})
+            if password_set(store):
+                target = "/login?" + urlencode({"next": target})
+            return with_session(RedirectResponse(target, status_code=303), request, None)
+        finally:
+            await form.close()
+            if upload_path and os.path.exists(upload_path):
+                os.remove(upload_path)
 
     @app.get("/healthz", response_class=PlainTextResponse)
     async def healthz():

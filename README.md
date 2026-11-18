@@ -27,7 +27,7 @@ Housekeeping:
 | `/` | every printer's tools with Clear buttons, storage with spool counts, and recent scans |
 | `/locations/<location>` | what's stored in a location |
 | `/tags` | URL and QR code for every tool, storage location and spool |
-| `/settings` | general settings, printers, storage locations, admin password |
+| `/settings` | general settings, printers, storage locations, admin password, backup & restore |
 | `/login` | only when an admin password is set |
 
 Tag scans pair per phone: a spool scan and a tool or storage scan pair up only if they come from the same browser (a cookie), so two people scanning at once don't mix. Tag scans never need a login. See [Security](#security) for what's protected and what isn't.
@@ -83,6 +83,42 @@ Load the spool into the AMS **before** scanning: if the printer reports the slot
 
 Orca only matches a lane to a preset by a **string** `filament_id`. If a Spoolman spool or filament has a text extra field `orca_filament_id`, spooltag passes that value through. Without it, Orca falls back to a generic profile for the material, and a slot-sync plugin can choose the exact PipSpool profile using `spool_id`.
 
+## Backup & restore
+
+At the bottom of **/settings** (admin only):
+
+- **Download backup** saves `spooltag-backup-<date>-<time>.db`. It's a consistent snapshot taken with SQLite's backup API while spooltag keeps running, so there's no need to stop it. It holds the general settings, printers (with their tag ids and API keys), storage locations, the admin password hash and the scan log. Login sessions and half-finished scans are left out.
+- **Restore backup** replaces **all** spooltag configuration with a backup file (10 MB max). The file is checked first: it must be an intact spooltag database, not from a newer spooltag, with no unexpected tables, views or triggers. Nothing is changed if the check fails. Then:
+  1. the current database is saved to `backups/spooltag-before-restore-<time>.db` in the data folder (the newest 5 are kept);
+  2. the backup is copied into the live database in one SQLite transaction, so it either fully happens or doesn't, and the file keeps its owner and `0600` mode;
+  3. spooltag reloads the restored settings immediately, with no restart. Everyone is logged out and pending scans are cancelled. If the backup had an admin password, log in with that password.
+
+  If anything fails after step 1, the previous configuration is copied back automatically.
+
+Printer ids, location ids and the tag base URL come from the backup, so the tags written for it keep working, as long as spooltag is reachable at that tag base URL.
+
+**Keep backups private.** A backup contains your Moonraker and Bambuddy API keys in plain text, plus the admin password hash. Store it like a password file, not in a shared folder. The safety copies in `/appdata/spooltag/backups/` contain the same things.
+
+Spoolman, Moonraker, Bambuddy and the printers' own config are **not** part of a spooltag backup. Back those up with their own tools; Spoolman's spool locations live in Spoolman.
+
+To restore without the web page (e.g. spooltag won't start), stop the container, copy the backup over `/appdata/spooltag/spooltag.db`, delete any `spooltag.db-journal` next to it, and start it again. The entrypoint fixes ownership and permissions on start.
+
+If you forget a restored backup's admin password: `docker exec spooltag python -m app.admin reset-password`.
+
+### Moving spooltag to another server
+
+Every tag holds the tag base URL (e.g. `http://10.10.2.176:7913`), so the new server must answer at that same address.
+
+1. On the old server, **Download backup**.
+2. Give the new Docker host the old IP address (a DHCP reservation, or move the IP), or, if the tag base URL uses a host name, point that name at the new host. Keep the same host port (`7913`).
+3. Deploy the stack on the new host from [`compose.yaml`](compose.yaml). The data folder can be empty.
+4. Open the new server **by IP address** (until the restore, it doesn't know your host names), go to `/settings`, and **Restore backup**.
+5. Log in with the backup's admin password if it had one. Then check `/` shows every printer and tap a tool tag and a spool tag.
+6. Make sure Spoolman, Moonraker (`trusted_clients`) and Bambuddy accept requests from the new host's IP. Their URLs come from the backup; if any of them moved too, update them under Settings.
+7. Stop the old container so two servers don't both write to Spoolman and the printers.
+
+If the address has to change, the tags have to be rewritten: restore the backup, change the tag base URL under General, and rewrite every tag from `/tags`.
+
 ## Upgrading from 0.3 or earlier
 
 Your settings, printers, storage locations, API keys and every tag URL carry over unchanged. Three things are new:
@@ -119,7 +155,7 @@ spooltag is built for a home network you trust. It is **not** meant to be expose
 - **Browsers older than Chrome 76 or Safari 16.4** don't send fetch metadata. For those, spooltag falls back to the `Referer` header, which a page can suppress, so a hidden cross-site request could still trigger a scan. Even then, it can only pair with a scan from the same browser.
 - **Both scans must happen in the same browser.** If a phone opens one tag in Safari and the other in an app's built-in browser, they won't pair. Private-browsing tabs or blocked cookies stop pairing too.
 - **Plain HTTP on the LAN.** Passwords and cookies cross your network unencrypted unless you put spooltag behind an HTTPS reverse proxy (it honours `X-Forwarded-Proto` from `127.0.0.1` only). API keys to Moonraker and Bambuddy also travel over plain HTTP.
-- **API keys are stored in plain text** in `spooltag.db`. The file is `0600` and owned by the service user, so keep host access to `/appdata/spooltag` restricted and back it up like a password file.
+- **API keys are stored in plain text** in `spooltag.db`, in downloaded backups, and in the safety copies under `backups/`. The database and safety copies are `0600` and owned by the service user, so keep host access to `/appdata/spooltag` restricted. Treat downloaded backups like a password file.
 - **Moonraker trusts your LAN.** Your printers already accept commands from any address in `trusted_clients`, which is more access than spooltag adds.
 
 **Recommended deployment**
