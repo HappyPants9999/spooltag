@@ -1,5 +1,5 @@
 # Runtime dependencies, pinned. Dependabot proposes updates (.github/dependabot.yml).
-fastapi==0.163.1
+fastapi==0.165.0
 starlette==1.10.0          # >=1.3.1: form-parsing DoS and Host-header URL fixes
 uvicorn==0.54.0
 h11==0.16.0                # >=0.16.0: request-smuggling fix
